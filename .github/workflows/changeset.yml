@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -29,14 +31,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check for changeset
-        uses: changesets/action@v1
-        with:
-          publish: pnpm release
-          commit: "chore: release packages"
-          title: "chore: release packages"
-          setupGitUser: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm changeset status --since=origin/main
 
 
 

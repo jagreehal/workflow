@@ -335,6 +335,40 @@ export interface RunStep<E = unknown> {
       | { error: Err; name?: string; key?: string }
       | { onError: (cause: unknown) => Err; name?: string; key?: string }
   ) => Promise<T>;
+
+  /**
+   * Execute a Result-returning function and map its error to a typed error.
+   *
+   * Use this when calling functions that return Result<T, E> and you want to
+   * map their typed errors to your workflow's error type. Unlike step.try(),
+   * the error passed to onError is typed (not unknown).
+   *
+   * @param operation - A function that returns a Result or AsyncResult
+   * @param options - Configuration including error mapping
+   * @returns The success value (unwrapped)
+   * @throws {EarlyExit} If the result is an error (stops execution safely)
+   *
+   * @example
+   * ```typescript
+   * const response = await step.fromResult(
+   *   () => callProvider(input),
+   *   {
+   *     name: "call-provider",
+   *     onError: (providerError) => ({
+   *       type: "PROVIDER_FAILED",
+   *       provider: providerError.provider,
+   *       cause: providerError
+   *     })
+   *   }
+   * );
+   * ```
+   */
+  fromResult: <T, ResultE, const Err extends E>(
+    operation: () => Result<T, ResultE, unknown> | AsyncResult<T, ResultE, unknown>,
+    options:
+      | { error: Err; name?: string; key?: string }
+      | { onError: (resultError: ResultE) => Err; name?: string; key?: string }
+  ) => Promise<T>;
 }
 
 // =============================================================================
@@ -498,6 +532,41 @@ function parseStepOptions(options?: StepOptions | string): { name?: string; key?
 // =============================================================================
 // run() Function
 // =============================================================================
+
+/**
+ * Execute a workflow with step-based error handling.
+ *
+ * ## When to Use run()
+ *
+ * Use `run()` when:
+ * - Dependencies are dynamic (passed at runtime, not known at compile time)
+ * - You don't need step caching or resume state
+ * - Error types are known upfront and can be specified manually
+ * - Building lightweight, one-off workflows
+ *
+ * For automatic error type inference from static dependencies, use `createWorkflow()`.
+ *
+ * ## Modes
+ *
+ * `run()` has three modes based on options:
+ * - **Strict Mode** (`catchUnexpected`): Returns `Result<T, E>` (closed union)
+ * - **Typed Mode** (`onError`): Returns `Result<T, E | UnexpectedError>`
+ * - **Safe Default** (no options): Returns `Result<T, UnexpectedError>`
+ *
+ * @example
+ * ```typescript
+ * // Typed mode with explicit error union
+ * const result = await run<Output, 'NOT_FOUND' | 'FETCH_ERROR'>(
+ *   async (step) => {
+ *     const user = await step(fetchUser(userId));
+ *     return user;
+ *   },
+ *   { onError: (e) => console.log('Failed:', e) }
+ * );
+ * ```
+ *
+ * @see createWorkflow - For static dependencies with auto error inference
+ */
 
 /**
  * Execute a workflow with "Strict Mode" error handling.
@@ -920,6 +989,96 @@ export async function run<T, E, C = void>(
           }
           onError?.(mapped as unknown as E, stepName);
           throw earlyExit(mapped as unknown as E, { origin: "throw", thrown: error });
+        }
+      })();
+    };
+
+    // step.fromResult: Execute a Result-returning function and map its typed error
+    stepFn.fromResult = <T, ResultE, Err>(
+      operation: () => Result<T, ResultE, unknown> | AsyncResult<T, ResultE, unknown>,
+      opts:
+        | { error: Err; name?: string; key?: string }
+        | { onError: (resultError: ResultE) => Err; name?: string; key?: string }
+    ): Promise<T> => {
+      const stepName = opts.name;
+      const stepKey = opts.key;
+      const mapToError = "error" in opts ? () => opts.error : opts.onError;
+      const hasEventListeners = onEvent;
+
+      return (async () => {
+        const startTime = hasEventListeners ? performance.now() : 0;
+
+        if (onEvent) {
+          emitEvent({
+            type: "step_start",
+            workflowId,
+            stepKey,
+            name: stepName,
+            ts: Date.now(),
+          });
+        }
+
+        const result = await operation();
+
+        if (result.ok) {
+          const durationMs = performance.now() - startTime;
+          emitEvent({
+            type: "step_success",
+            workflowId,
+            stepKey,
+            name: stepName,
+            ts: Date.now(),
+            durationMs,
+          });
+          // Emit step_complete for keyed steps (for state persistence)
+          if (stepKey) {
+            emitEvent({
+              type: "step_complete",
+              workflowId,
+              stepKey,
+              name: stepName,
+              ts: Date.now(),
+              durationMs,
+              result: ok(result.value),
+            });
+          }
+          return result.value;
+        } else {
+          const mapped = mapToError(result.error);
+          const durationMs = performance.now() - startTime;
+          // For fromResult, the cause is the original result.error (what got mapped)
+          // This is analogous to step.try using thrown exception as cause
+          const wrappedError = wrapForStep(mapped, {
+            origin: "result",
+            resultCause: result.error,
+          });
+          emitEvent({
+            type: "step_error",
+            workflowId,
+            stepKey,
+            name: stepName,
+            ts: Date.now(),
+            durationMs,
+            error: wrappedError,
+          });
+          // Emit step_complete for keyed steps (for state persistence)
+          if (stepKey) {
+            emitEvent({
+              type: "step_complete",
+              workflowId,
+              stepKey,
+              name: stepName,
+              ts: Date.now(),
+              durationMs,
+              result: err(mapped, { cause: result.error }),
+              meta: { origin: "result", resultCause: result.error },
+            });
+          }
+          onError?.(mapped as unknown as E, stepName);
+          throw earlyExit(mapped as unknown as E, {
+            origin: "result",
+            resultCause: result.error,
+          });
         }
       })();
     };

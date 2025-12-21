@@ -131,6 +131,33 @@ const result = await workflow(async (step) => {
 // result.error: 'NOT_FOUND' | 'FETCH_FAILED' | 'PARSE_FAILED' | UnexpectedError
 ```
 
+### Wrapping Result-returning functions with step.fromResult
+
+When calling functions that return `Result<T, E>`, use `step.fromResult()` to map their typed errors:
+
+```typescript
+// callProvider returns Result<Response, ProviderError>
+const callProvider = async (input: string): AsyncResult<Response, ProviderError> => { ... };
+
+const result = await workflow(async (step) => {
+  // step.fromResult gives you typed errors in onError (not unknown like step.try)
+  const response = await step.fromResult(
+    () => callProvider(input),
+    {
+      onError: (e) => ({
+        type: 'PROVIDER_FAILED' as const,
+        provider: e.provider,  // TypeScript knows e is ProviderError
+        code: e.code,
+      })
+    }
+  );
+
+  return response;
+});
+```
+
+Unlike `step.try()` where `onError` receives `unknown`, `step.fromResult()` preserves the error type.
+
 ### Parallel operations
 
 ```typescript
@@ -163,11 +190,45 @@ if (result.ok) {
 | Function | What it does |
 |----------|--------------|
 | `createWorkflow(deps)` | Create workflow with auto-inferred error types |
+| `run(callback, options)` | Execute workflow with manual error types |
 | `step(op())` | Unwrap Result or exit early |
 | `step.try(fn, { error })` | Catch throws/rejects → typed error |
+| `step.fromResult(fn, { onError })` | Map Result errors with typed onError |
 | `ok(value)` / `err(error)` | Create Results |
 | `map`, `andThen`, `match` | Transform Results |
 | `allAsync`, `partition` | Batch operations |
+
+### Choosing Between run() and createWorkflow()
+
+| Use Case | Recommendation |
+|----------|----------------|
+| Dependencies known at compile time | `createWorkflow()` |
+| Dependencies passed as parameters | `run()` |
+| Need step caching or resume | `createWorkflow()` |
+| One-off workflow invocation | `run()` |
+| Want automatic error inference | `createWorkflow()` |
+| Error types known upfront | `run()` |
+
+**`run()`** - Best for dynamic dependencies, testing, or lightweight workflows where you know the error types:
+
+```typescript
+import { run } from '@jagreehal/workflow';
+
+const result = await run<Output, 'NOT_FOUND' | 'FETCH_ERROR'>(
+  async (step) => {
+    const user = await step(fetchUser(userId)); // userId from parameter
+    return user;
+  },
+  { onError: (e) => console.log('Failed:', e) }
+);
+```
+
+**`createWorkflow()`** - Best for reusable workflows with static dependencies. Provides automatic error type inference:
+
+```typescript
+const loadUser = createWorkflow({ fetchUser, fetchPosts });
+// Error type computed automatically from deps
+```
 
 ### Import paths
 

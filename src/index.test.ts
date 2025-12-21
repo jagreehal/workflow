@@ -679,6 +679,181 @@ describe("run() - do-notation style", () => {
     });
   });
 
+  describe("step.fromResult() with Result-returning functions", () => {
+    it("unwraps success values", async () => {
+      const fetchUser = (id: string) => ok({ id, name: "Alice" });
+
+      const result = await run(
+        async (step) => {
+          const user = await step.fromResult(() => fetchUser("1"), {
+            error: "FETCH_FAILED",
+          });
+          return user;
+        },
+        { onError: () => {} }
+      );
+
+      expect(result).toEqual({ ok: true, value: { id: "1", name: "Alice" } });
+    });
+
+    it("maps Result errors using onError callback", async () => {
+      type UserError = { type: "NOT_FOUND"; userId: string };
+      const fetchUser = (id: string): Result<{ id: string; name: string }, UserError> =>
+        err({ type: "NOT_FOUND", userId: id });
+
+      const result = await run(
+        async (step) => {
+          const user = await step.fromResult(() => fetchUser("1"), {
+            onError: (e) => ({ code: "USER_ERROR", original: e }),
+          });
+          return user;
+        },
+        { onError: () => {} }
+      );
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toEqual({
+          code: "USER_ERROR",
+          original: { type: "NOT_FOUND", userId: "1" },
+        });
+        // The cause is the original Result error
+        expect(result.cause).toEqual({ type: "NOT_FOUND", userId: "1" });
+      }
+    });
+
+    it("maps Result errors using static error shorthand", async () => {
+      const failingOp = (): Result<number, string> => err("ORIGINAL_ERROR");
+
+      const result = await run(
+        async (step) => {
+          return await step.fromResult(() => failingOp(), {
+            error: "MAPPED_ERROR" as const,
+          });
+        },
+        { onError: () => {} }
+      );
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBe("MAPPED_ERROR");
+        expect(result.cause).toBe("ORIGINAL_ERROR");
+      }
+    });
+
+    it("works with async Result-returning functions", async () => {
+      const asyncFetch = async (): AsyncResult<string, "TIMEOUT"> => {
+        await new Promise((r) => setTimeout(r, 1));
+        return err("TIMEOUT");
+      };
+
+      const result = await run(
+        async (step) => {
+          return await step.fromResult(() => asyncFetch(), {
+            onError: (e) => ({ type: "NETWORK", reason: e }),
+          });
+        },
+        { onError: () => {} }
+      );
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toEqual({ type: "NETWORK", reason: "TIMEOUT" });
+      }
+    });
+
+    it("preserves Result cause in the error chain", async () => {
+      const opWithCause = (): Result<number, string, Error> =>
+        err("DB_ERROR", { cause: new Error("connection refused") });
+
+      const result = await run(
+        async (step) => {
+          return await step.fromResult(() => opWithCause(), {
+            error: "MAPPED" as const,
+          });
+        },
+        { onError: () => {} }
+      );
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBe("MAPPED");
+        // The cause is the original Result error
+        expect(result.cause).toBe("DB_ERROR");
+      }
+    });
+
+    it("provides typed error in onError unlike step.try", async () => {
+      // This is the key ergonomic improvement over step.try
+      // In step.try, onError receives `unknown`
+      // In step.fromResult, onError receives the typed Result error
+
+      type ProviderError = { provider: string; code: number };
+      const callProvider = (): Result<string, ProviderError> =>
+        err({ provider: "openai", code: 429 });
+
+      const result = await run(
+        async (step) => {
+          return await step.fromResult(() => callProvider(), {
+            // e is typed as ProviderError, not unknown!
+            onError: (e) => ({
+              type: "RATE_LIMITED" as const,
+              provider: e.provider, // TypeScript knows this exists
+              code: e.code, // TypeScript knows this exists
+            }),
+          });
+        },
+        { onError: () => {} }
+      );
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toEqual({
+          type: "RATE_LIMITED",
+          provider: "openai",
+          code: 429,
+        });
+      }
+    });
+
+    it("emits events with name and key", async () => {
+      const events: unknown[] = [];
+      const failingOp = (): Result<number, string> => err("ERROR");
+
+      await run(
+        async (step) => {
+          return await step.fromResult(() => failingOp(), {
+            error: "MAPPED",
+            name: "fromResultStep",
+            key: "fr:1",
+          });
+        },
+        {
+          onError: () => {},
+          onEvent: (e) => events.push(e),
+        }
+      );
+
+      const stepStart = events.find(
+        (e) => (e as { type: string }).type === "step_start"
+      );
+      const stepError = events.find(
+        (e) => (e as { type: string }).type === "step_error"
+      );
+      const stepComplete = events.find(
+        (e) => (e as { type: string }).type === "step_complete"
+      );
+
+      expect(stepStart).toMatchObject({ name: "fromResultStep", stepKey: "fr:1" });
+      expect(stepError).toMatchObject({ name: "fromResultStep", stepKey: "fr:1" });
+      expect(stepComplete).toMatchObject({
+        name: "fromResultStep",
+        stepKey: "fr:1",
+        meta: { origin: "result" },
+      });
+    });
+  });
+
   // NOTE: errors() helper was removed in v2. Use run<T, E>(..., { onError }) for explicit types.
 
   describe("unexpected error handling", () => {

@@ -34,7 +34,7 @@ Changeset files are temporary and will be automatically deleted after versioning
 
 ```
 ---
-"@jreehal/workflow": patch
+"@jagreehal/workflow": patch
 ---
 
 Description of the change

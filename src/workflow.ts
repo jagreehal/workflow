@@ -1,5 +1,5 @@
 /**
- * @jreehal/workflow/workflow
+ * @jagreehal/workflow/workflow
  *
  * Workflow orchestration with createWorkflow.
  * Use this for typed async workflows with automatic error inference.

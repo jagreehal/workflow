@@ -1,5 +1,5 @@
 /**
- * @jreehal/workflow
+ * @jagreehal/workflow
  *
  * Typed async workflows with early-exit, using async/await and Result types.
  *
@@ -41,14 +41,14 @@
  * ## Entry Points
  *
  * For minimal bundle size, import from specific entry points:
- * - `@jreehal/workflow/core` - Result primitives and `run()` (smallest bundle)
- * - `@jreehal/workflow/workflow` - `createWorkflow` and workflow features
- * - `@jreehal/workflow` - Everything (convenient, but larger bundle)
+ * - `@jagreehal/workflow/core` - Result primitives and `run()` (smallest bundle)
+ * - `@jagreehal/workflow/workflow` - `createWorkflow` and workflow features
+ * - `@jagreehal/workflow` - Everything (convenient, but larger bundle)
  *
  * ## Quick Start
  *
  * ```typescript
- * import { createWorkflow, ok, err, type AsyncResult } from '@jreehal/workflow';
+ * import { createWorkflow, ok, err, type AsyncResult } from '@jagreehal/workflow';
  *
  * const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND'> =>
  *   id === '1' ? ok({ id, name: 'Alice' }) : err('NOT_FOUND');

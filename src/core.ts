@@ -1,5 +1,5 @@
 /**
- * @jreehal/workflow/core
+ * @jagreehal/workflow/core
  *
  * Core Result primitives and run() function.
  * Use this module for minimal bundle size when you don't need the full workflow capabilities

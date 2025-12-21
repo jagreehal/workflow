@@ -1,9 +1,9 @@
-# @jreehal/workflow
+# @jagreehal/workflow
 
 Typed async workflows with automatic error inference. Build type-safe workflows with Result types, step caching, resume state, and human-in-the-loop support.
 
 ```bash
-npm install @jreehal/workflow
+npm install @jagreehal/workflow
 ```
 
 ## The Problem
@@ -24,7 +24,7 @@ async function loadUserData(id: string) {
 ## The Solution
 
 ```typescript
-import { createWorkflow, ok, err, type AsyncResult } from '@jreehal/workflow';
+import { createWorkflow, ok, err, type AsyncResult } from '@jagreehal/workflow';
 
 const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND'> =>
   id === '1' ? ok({ id, name: 'Alice' }) : err('NOT_FOUND');
@@ -134,7 +134,7 @@ const result = await workflow(async (step) => {
 ### Parallel operations
 
 ```typescript
-import { allAsync, partition, map } from '@jreehal/workflow';
+import { allAsync, partition, map } from '@jagreehal/workflow';
 
 // First error wins
 const result = await allAsync([
@@ -172,9 +172,9 @@ if (result.ok) {
 ### Import paths
 
 ```typescript
-import { createWorkflow, ok, err } from '@jreehal/workflow';           // Full library
-import { createWorkflow } from '@jreehal/workflow/workflow';            // Workflow only
-import { ok, err, map, all } from '@jreehal/workflow/core';             // Primitives only
+import { createWorkflow, ok, err } from '@jagreehal/workflow';           // Full library
+import { createWorkflow } from '@jagreehal/workflow/workflow';            // Workflow only
+import { ok, err, map, all } from '@jagreehal/workflow/core';             // Primitives only
 ```
 
 ## Advanced
@@ -205,7 +205,7 @@ const result = await workflow(async (step) => {
 Save step results for workflow replay:
 
 ```typescript
-import { createWorkflow, isStepComplete, type ResumeStateEntry } from '@jreehal/workflow';
+import { createWorkflow, isStepComplete, type ResumeStateEntry } from '@jagreehal/workflow';
 
 const savedSteps = new Map<string, ResumeStateEntry>();
 const userId = '123';
@@ -260,7 +260,7 @@ const workflow = createWorkflow({ fetchUser }, {
 ### Human-in-the-loop
 
 ```typescript
-import { createApprovalStep, isPendingApproval, injectApproval } from '@jreehal/workflow';
+import { createApprovalStep, isPendingApproval, injectApproval } from '@jagreehal/workflow';
 
 const requireApproval = createApprovalStep<{ approvedBy: string }>({
   key: 'approval:deploy',

@@ -1,5 +1,5 @@
 /**
- * Type tests for @jreehal/workflow
+ * Type tests for @jagreehal/workflow
  * Run with: pnpm tsd
  *
  * REALITY CHECK: TypeScript cannot infer error types from inside callback bodies.

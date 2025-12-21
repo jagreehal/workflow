@@ -5,7 +5,7 @@ For core concepts (`createWorkflow`, `step`, `step.try`), see the [README](../RE
 ## Batch operations
 
 ```typescript
-import { all, allSettled, any, partition } from '@jreehal/workflow';
+import { all, allSettled, any, partition } from '@jagreehal/workflow';
 
 // All must succeed (short-circuits on first error)
 const combined = all([ok(1), ok(2), ok(3)]); // ok([1, 2, 3])
@@ -50,7 +50,7 @@ const result = await workflow(async (step) => {
 ## Type utilities
 
 ```typescript
-import { type ErrorOf, type Errors, type ErrorsOfDeps } from '@jreehal/workflow';
+import { type ErrorOf, type Errors, type ErrorsOfDeps } from '@jagreehal/workflow';
 
 // Extract error type from a function
 type UserError = ErrorOf<typeof fetchUser>; // 'NOT_FOUND'
@@ -66,7 +66,7 @@ type WorkflowErrors = ErrorsOfDeps<{ fetchUser: typeof fetchUser }>;
 ## Wrapping existing code
 
 ```typescript
-import { from, fromPromise, tryAsync, fromNullable } from '@jreehal/workflow';
+import { from, fromPromise, tryAsync, fromNullable } from '@jagreehal/workflow';
 
 // Sync throwing function
 const parsed = from(
@@ -93,7 +93,7 @@ const element = fromNullable(
 ## Transformers
 
 ```typescript
-import { map, mapError, match, andThen, tap } from '@jreehal/workflow';
+import { map, mapError, match, andThen, tap } from '@jagreehal/workflow';
 
 const doubled = map(ok(21), n => n * 2); // ok(42)
 
@@ -122,7 +122,7 @@ import {
   createHITLCollector,
   isPendingApproval,
   injectApproval,
-} from '@jreehal/workflow';
+} from '@jagreehal/workflow';
 
 // 1. Create an approval step
 const requireManagerApproval = createApprovalStep<{ approvedBy: string }>({
@@ -186,7 +186,7 @@ injectApproval(state, { stepKey, value })  // Add approval result
 
 ```typescript
 import { Result as NTResult } from 'neverthrow';
-import { ok, err, type Result } from '@jreehal/workflow';
+import { ok, err, type Result } from '@jagreehal/workflow';
 
 function fromNeverthrow<T, E>(ntResult: NTResult<T, E>): Result<T, E> {
   return ntResult.isOk() ? ok(ntResult.value) : err(ntResult.error);
@@ -204,7 +204,7 @@ const result = await workflow(async (step) => {
 `createWorkflow` is built on `run()`. Use it for one-off workflows:
 
 ```typescript
-import { run } from '@jreehal/workflow';
+import { run } from '@jagreehal/workflow';
 
 const result = await run(async (step) => {
   const user = await step(fetchUser(id));
@@ -217,7 +217,7 @@ const result = await run(async (step) => {
 For closed error unions without `UnexpectedError`:
 
 ```typescript
-import { run } from '@jreehal/workflow';
+import { run } from '@jagreehal/workflow';
 
 type AppError = 'NOT_FOUND' | 'UNAUTHORIZED' | 'UNEXPECTED';
 

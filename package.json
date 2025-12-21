@@ -1,5 +1,5 @@
 {
-  "name": "@jreehal/workflow",
+  "name": "@jagreehal/workflow",
   "version": "1.0.0",
   "type": "module",
   "description": "Typed async workflows with automatic error inference. Build type-safe workflows with Result types, step caching, resume state, and human-in-the-loop support.",

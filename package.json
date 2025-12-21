@@ -1,0 +1,119 @@
+{
+  "name": "@jreehal/workflow",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Typed async workflows with automatic error inference. Build type-safe workflows with Result types, step caching, resume state, and human-in-the-loop support.",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js",
+      "require": "./dist/core.cjs"
+    },
+    "./workflow": {
+      "types": "./dist/workflow.d.ts",
+      "import": "./dist/workflow.js",
+      "require": "./dist/workflow.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "build:tsc": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "clean": "rm -rf dist lib",
+    "prebuild": "pnpm clean",
+    "prepare": "pnpm build",
+    "prepublishOnly": "pnpm build:tsc && pnpm run test && pnpm run lint",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish"
+  },
+  "keywords": [
+    "workflow",
+    "workflows",
+    "result",
+    "result-type",
+    "error-handling",
+    "typescript",
+    "async",
+    "async-await",
+    "type-safe",
+    "type-inference",
+    "railway-oriented-programming",
+    "functional-programming",
+    "either",
+    "monad",
+    "step",
+    "orchestration",
+    "pipeline",
+    "early-exit",
+    "resume",
+    "caching",
+    "hitl",
+    "human-in-the-loop"
+  ],
+  "author": "Jag Reehal <jag@jagreehal.com>",
+  "homepage": "https://github.com/jagreehal/workflow#readme",
+  "bugs": {
+    "url": "https://github.com/jagreehal/workflow/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jagreehal/workflow.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@changesets/cli": "^2.29.8",
+    "@eslint/js": "^9.39.2",
+    "@ianvs/prettier-plugin-sort-imports": "^4.7.0",
+    "@total-typescript/ts-reset": "^0.6.1",
+    "@total-typescript/tsconfig": "^1.0.4",
+    "@types/node": "^25.0.3",
+    "@types/picomatch": "^4.0.2",
+    "@typescript-eslint/eslint-plugin": "^8.50.0",
+    "@typescript-eslint/parser": "^8.50.0",
+    "@typescript-eslint/rule-tester": "^8.50.0",
+    "@typescript-eslint/utils": "^8.50.0",
+    "@vitest/coverage-v8": "^4.0.16",
+    "eslint": "9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-unicorn": "^62.0.0",
+    "tsd": "^0.33.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.50.0",
+    "vitest": "^4.0.16"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "tsd": {
+    "directory": "src",
+    "testFilePattern": "**/index.test-d.ts",
+    "compilerOptions": {
+      "strict": true,
+      "noUnusedLocals": false,
+      "noUnusedParameters": false,
+      "skipLibCheck": true
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

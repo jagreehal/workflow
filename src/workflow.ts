@@ -1,0 +1,1325 @@
+/**
+ * @jreehal/workflow/workflow
+ *
+ * Workflow orchestration with createWorkflow.
+ * Use this for typed async workflows with automatic error inference.
+ */
+
+import {
+  run,
+  ok,
+  err,
+  createEarlyExit,
+  isEarlyExit,
+  type EarlyExit,
+  type StepFailureMeta,
+  type Result,
+  type AsyncResult,
+  type UnexpectedError,
+  type RunStep,
+  type WorkflowEvent,
+  type StepOptions,
+  type ErrorOf,
+  type CauseOf,
+} from "./core";
+
+// Re-export types that workflow users commonly need
+export type {
+  Result,
+  AsyncResult,
+  UnexpectedError,
+  RunStep,
+  WorkflowEvent,
+  StepOptions,
+} from "./core";
+
+// =============================================================================
+// Step Cache Types
+// =============================================================================
+
+/**
+ * Interface for step result caching.
+ * Implement this interface to provide custom caching strategies.
+ * A simple Map<string, Result> works for in-memory caching.
+ *
+ * Note: Cache stores Result<unknown, unknown, unknown> because different steps
+ * have different value/error/cause types. The actual runtime values are preserved;
+ * only the static types are widened. For error results, the cause value is encoded
+ * in CachedErrorCause to preserve metadata for proper replay.
+ *
+ * @example
+ * // Simple in-memory cache
+ * const cache = new Map<string, Result<unknown, unknown, unknown>>();
+ *
+ * // Or implement custom cache with TTL, LRU, etc.
+ * const cache: StepCache = {
+ *   get: (key) => myCache.get(key),
+ *   set: (key, result) => myCache.set(key, result, { ttl: 60000 }),
+ *   has: (key) => myCache.has(key),
+ *   delete: (key) => myCache.delete(key),
+ *   clear: () => myCache.clear(),
+ * };
+ */
+export interface StepCache {
+  get(key: string): Result<unknown, unknown, unknown> | undefined;
+  set(key: string, result: Result<unknown, unknown, unknown>): void;
+  has(key: string): boolean;
+  delete(key: string): boolean;
+  clear(): void;
+}
+
+/**
+ * Entry for a saved step result with optional metadata.
+ * The meta field preserves origin information for proper replay.
+ */
+export interface ResumeStateEntry {
+  result: Result<unknown, unknown, unknown>;
+  /** Optional metadata for error origin (from step_complete event) */
+  meta?: StepFailureMeta;
+}
+
+/**
+ * Resume state for workflow replay.
+ * Pre-populate step results to skip execution on resume.
+ *
+ * Note: When saving to persistent storage, you may need custom serialization
+ * for complex cause types. JSON.stringify works for simple values, but Error
+ * objects and other non-plain types require special handling.
+ *
+ * @example
+ * // Collect from step_complete events using the helper
+ * const collector = createStepCollector();
+ * const workflow = createWorkflow({ fetchUser }, {
+ *   onEvent: collector.handleEvent,
+ * });
+ * // Later: collector.getState() returns ResumeState
+ *
+ * @example
+ * // Resume with saved state
+ * const workflow = createWorkflow({ fetchUser }, {
+ *   resumeState: { steps: savedSteps }
+ * });
+ */
+export interface ResumeState {
+  /** Map of step keys to their cached results with optional metadata */
+  steps: Map<string, ResumeStateEntry>;
+}
+
+/**
+ * Create a collector for step results to build resume state.
+ *
+ * ## When to Use
+ *
+ * Use `createStepCollector` when you need to:
+ * - **Save workflow state** for later replay/resume
+ * - **Persist step results** to a database or file system
+ * - **Build resume state** from workflow execution
+ * - **Enable workflow replay** after application restarts
+ *
+ * ## Why Use This Instead of Manual Collection
+ *
+ * - **Automatic filtering**: Only collects `step_complete` events (ignores other events)
+ * - **Metadata preservation**: Captures both result and meta for proper error replay
+ * - **Type-safe**: Returns properly typed `ResumeState`
+ * - **Convenient API**: Simple `handleEvent` → `getState` pattern
+ *
+ * ## How It Works
+ *
+ * 1. Create collector and pass `handleEvent` to workflow's `onEvent` option
+ * 2. Workflow emits `step_complete` events for keyed steps
+ * 3. Collector automatically captures these events
+ * 4. Call `getState()` to get the collected `ResumeState`
+ * 5. Persist state (e.g., to database) for later resume
+ *
+ * ## Important Notes
+ *
+ * - Only steps with a `key` option are collected (unkeyed steps are not saved)
+ * - The collector preserves error metadata for proper replay behavior
+ * - State can be serialized to JSON (but complex cause types may need custom handling)
+ *
+ * @returns An object with:
+ *   - `handleEvent`: Function to pass to workflow's `onEvent` option
+ *   - `getState`: Get collected resume state (call after workflow execution)
+ *   - `clear`: Clear all collected state
+ *
+ * @example
+ * ```typescript
+ * // Collect state during workflow execution
+ * const collector = createStepCollector();
+ *
+ * const workflow = createWorkflow({ fetchUser, fetchPosts }, {
+ *   onEvent: collector.handleEvent, // Pass collector's handler
+ * });
+ *
+ * await workflow(async (step) => {
+ *   // Only keyed steps are collected
+ *   const user = await step(() => fetchUser("1"), { key: "user:1" });
+ *   const posts = await step(() => fetchPosts(user.id), { key: `posts:${user.id}` });
+ *   return { user, posts };
+ * });
+ *
+ * // Get collected state for persistence
+ * const state = collector.getState();
+ * // state.steps contains: 'user:1' and 'posts:1' entries
+ *
+ * // Save to database
+ * await db.saveWorkflowState(workflowId, state);
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // Resume workflow from saved state
+ * const savedState = await db.loadWorkflowState(workflowId);
+ * const workflow = createWorkflow({ fetchUser, fetchPosts }, {
+ *   resumeState: savedState // Pre-populate cache from saved state
+ * });
+ *
+ * // Cached steps skip execution, new steps run normally
+ * await workflow(async (step) => {
+ *   const user = await step(() => fetchUser("1"), { key: "user:1" }); // Cache hit
+ *   const posts = await step(() => fetchPosts(user.id), { key: `posts:${user.id}` }); // Cache hit
+ *   return { user, posts };
+ * });
+ * ```
+ */
+export function createStepCollector(): {
+  handleEvent: (event: WorkflowEvent<unknown>) => void;
+  getState: () => ResumeState;
+  clear: () => void;
+} {
+  const steps = new Map<string, ResumeStateEntry>();
+
+  return {
+    handleEvent: (event: WorkflowEvent<unknown>) => {
+      if (isStepComplete(event)) {
+        steps.set(event.stepKey, { result: event.result, meta: event.meta });
+      }
+    },
+    getState: () => ({ steps: new Map(steps) }),
+    clear: () => steps.clear(),
+  };
+}
+
+// =============================================================================
+// Cache Entry Encoding (preserves StepFailureMeta for proper replay)
+// =============================================================================
+
+/**
+ * Marker for cached error entries that include step failure metadata.
+ * This allows us to preserve origin:"throw" vs origin:"result" when replaying,
+ * while also preserving the original cause value for direct cache access.
+ * @internal
+ */
+interface CachedErrorCause<C = unknown> {
+  __cachedMeta: true;
+  /** The original cause from the step result (preserved for direct access) */
+  originalCause: C;
+  /** Metadata for proper replay behavior */
+  meta: StepFailureMeta;
+}
+
+function isCachedErrorCause(cause: unknown): cause is CachedErrorCause {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    (cause as CachedErrorCause).__cachedMeta === true
+  );
+}
+
+/**
+ * Encode an error result for caching, preserving both the original cause
+ * and metadata needed for proper replay.
+ */
+function encodeCachedError<E, C>(
+  error: E,
+  meta: StepFailureMeta,
+  originalCause: C
+): Result<never, E, CachedErrorCause<C>> {
+  return err(error, {
+    cause: { __cachedMeta: true, originalCause, meta } as CachedErrorCause<C>,
+  });
+}
+
+function decodeCachedMeta(cause: unknown): StepFailureMeta {
+  if (isCachedErrorCause(cause)) {
+    return cause.meta;
+  }
+  // Fallback for any non-encoded cause (shouldn't happen, but safe default)
+  return { origin: "result", resultCause: cause };
+}
+
+// =============================================================================
+// createWorkflow Types
+// =============================================================================
+
+/**
+ * Constraint for Result-returning functions
+ * Used by createWorkflow to ensure only valid functions are passed
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type AnyResultFn = (...args: any[]) => Result<any, any, any> | Promise<Result<any, any, any>>;
+
+/**
+ * Extract union of error types from a deps object
+ * Example: ErrorsOfDeps<{ fetchUser: typeof fetchUser, fetchPosts: typeof fetchPosts }>
+ * yields: 'NOT_FOUND' | 'FETCH_ERROR'
+ */
+export type ErrorsOfDeps<Deps extends Record<string, AnyResultFn>> =
+  ErrorOf<Deps[keyof Deps]>;
+
+/**
+ * Extract union of cause types from a deps object.
+ * Example: CausesOfDeps<{ fetchUser: typeof fetchUser }> where fetchUser returns Result<User, "NOT_FOUND", Error>
+ * yields: Error
+ *
+ * Note: This represents the domain cause types from declared functions.
+ * However, workflow results may also have unknown causes from step.try failures
+ * or uncaught exceptions, so the actual Result cause type is `unknown`.
+ */
+export type CausesOfDeps<Deps extends Record<string, AnyResultFn>> =
+  CauseOf<Deps[keyof Deps]>;
+
+/**
+ * Non-strict workflow options
+ * Returns E | UnexpectedError (safe default)
+ */
+export type WorkflowOptions<E, C = void> = {
+  onError?: (error: E | UnexpectedError, stepName?: string) => void;
+  /** Unified event stream for workflow and step lifecycle */
+  onEvent?: (event: WorkflowEvent<E | UnexpectedError>, ctx: C) => void;
+  /** Create per-run context for event correlation */
+  createContext?: () => C;
+  /** Step result cache - only steps with a `key` option are cached */
+  cache?: StepCache;
+  /** Pre-populate cache from saved state for workflow resume */
+  resumeState?: ResumeState | (() => ResumeState | Promise<ResumeState>);
+  catchUnexpected?: never;  // prevent footgun: can't use without strict: true
+  strict?: false;           // default
+};
+
+/**
+ * Strict workflow options
+ * Returns E | U (closed error union)
+ */
+export type WorkflowOptionsStrict<E, U, C = void> = {
+  strict: true;              // discriminator
+  catchUnexpected: (cause: unknown) => U;
+  onError?: (error: E | U, stepName?: string) => void;
+  /** Unified event stream for workflow and step lifecycle */
+  onEvent?: (event: WorkflowEvent<E | U>, ctx: C) => void;
+  /** Create per-run context for event correlation */
+  createContext?: () => C;
+  /** Step result cache - only steps with a `key` option are cached */
+  cache?: StepCache;
+  /** Pre-populate cache from saved state for workflow resume */
+  resumeState?: ResumeState | (() => ResumeState | Promise<ResumeState>);
+};
+
+/**
+ * Workflow return type (non-strict)
+ * Supports both argument-less and argument-passing call patterns
+ *
+ * Note: Cause type is `unknown` because:
+ * - step.try errors have thrown values as cause
+ * - Uncaught exceptions produce unknown causes
+ * - Different steps may have different cause types
+ * The cause IS preserved at runtime; narrow based on error type if needed.
+ */
+export interface Workflow<E, Deps> {
+  /**
+   * Execute workflow without arguments (original API)
+   */
+  <T>(fn: (step: RunStep<E>, deps: Deps) => T | Promise<T>): AsyncResult<T, E | UnexpectedError, unknown>;
+
+  /**
+   * Execute workflow with typed arguments
+   * @param args - Typed arguments passed to the callback (type inferred at call site)
+   * @param fn - Callback receives (step, deps, args)
+   */
+  <T, Args>(
+    args: Args,
+    fn: (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>
+  ): AsyncResult<T, E | UnexpectedError, unknown>;
+}
+
+/**
+ * Workflow return type (strict)
+ * Supports both argument-less and argument-passing call patterns
+ *
+ * Note: Cause type is `unknown` because catchUnexpected receives thrown
+ * values which have unknown type.
+ */
+export interface WorkflowStrict<E, U, Deps> {
+  /**
+   * Execute workflow without arguments (original API)
+   */
+  <T>(fn: (step: RunStep<E>, deps: Deps) => T | Promise<T>): AsyncResult<T, E | U, unknown>;
+
+  /**
+   * Execute workflow with typed arguments
+   * @param args - Typed arguments passed to the callback (type inferred at call site)
+   * @param fn - Callback receives (step, deps, args)
+   */
+  <T, Args>(
+    args: Args,
+    fn: (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>
+  ): AsyncResult<T, E | U, unknown>;
+}
+
+// =============================================================================
+// createWorkflow - Automatic Error Type Inference
+// =============================================================================
+
+/**
+ * Create a typed workflow with automatic error inference.
+ *
+ * ## When to Use `createWorkflow`
+ *
+ * Use `createWorkflow` when you have:
+ * - **Multiple dependent async operations** that need to run sequentially
+ * - **Complex error handling** where you want type-safe error unions
+ * - **Need for observability** via event streams (onEvent)
+ * - **Step caching** requirements for expensive operations
+ * - **Resume/replay** capabilities for long-running workflows
+ * - **Human-in-the-loop** workflows requiring approvals
+ *
+ * ## Why Use `createWorkflow` Instead of `run()`
+ *
+ * 1. **Automatic Error Type Inference**: Errors are computed from your declared functions
+ *    - No manual error union management
+ *    - TypeScript ensures all possible errors are handled
+ *    - Refactoring is safer - adding/removing functions updates error types automatically
+ *
+ * 2. **Step Caching**: Expensive operations can be cached by key
+ *    - Prevents duplicate API calls
+ *    - Useful for idempotent operations
+ *    - Supports resume state for workflow replay
+ *
+ * 3. **Event Stream**: Built-in observability via `onEvent`
+ *    - Track workflow and step lifecycle
+ *    - Monitor performance (durationMs)
+ *    - Build dashboards and debugging tools
+ *
+ * 4. **Resume State**: Save and replay workflows
+ *    - Useful for long-running processes
+ *    - Supports human-in-the-loop workflows
+ *    - Enables workflow persistence across restarts
+ *
+ * ## How It Works
+ *
+ * 1. **Declare Dependencies**: Pass an object of Result-returning functions
+ * 2. **Automatic Inference**: Error types are extracted from function return types
+ * 3. **Execute Workflow**: Call the returned workflow function with your logic
+ * 4. **Early Exit**: `step()` unwraps Results - on error, workflow exits immediately
+ *
+ * ## Error Type Inference
+ *
+ * The error union is automatically computed from all declared functions:
+ * - Each function's error type is extracted
+ * - Union of all errors is created
+ * - `UnexpectedError` is added for uncaught exceptions (unless strict mode)
+ *
+ * ## Strict Mode
+ *
+ * Use `strict: true` with `catchUnexpected` for closed error unions:
+ * - Removes `UnexpectedError` from the union
+ * - All errors must be explicitly handled
+ * - Useful for production code where you want exhaustive error handling
+ *
+ * @param deps - Object mapping names to Result-returning functions.
+ *               These functions must return `Result<T, E>` or `Promise<Result<T, E>>`.
+ *               The error types (`E`) from all functions are automatically combined into a union.
+ * @param options - Optional configuration:
+ *   - `onEvent`: Callback for workflow/step lifecycle events
+ *   - `onError`: Callback for error logging/debugging
+ *   - `cache`: Step result cache (Map or custom StepCache implementation)
+ *   - `resumeState`: Pre-populated step results for workflow replay
+ *   - `createContext`: Factory for per-run context (passed to onEvent)
+ *   - `strict`: Enable strict mode (requires `catchUnexpected`)
+ *   - `catchUnexpected`: Map uncaught exceptions to typed errors (required in strict mode)
+ *
+ * @returns A workflow function that accepts your workflow logic and returns an AsyncResult.
+ *          The error type is automatically inferred from the `deps` parameter.
+ *
+ * @example
+ * ```typescript
+ * // Basic usage - automatic error inference
+ * const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND'> =>
+ *   id === '1' ? ok({ id, name: 'Alice' }) : err('NOT_FOUND');
+ *
+ * const fetchPosts = async (userId: string): AsyncResult<Post[], 'FETCH_ERROR'> =>
+ *   ok([{ id: 1, title: 'Hello' }]);
+ *
+ * const getPosts = createWorkflow({ fetchUser, fetchPosts });
+ *
+ * const result = await getPosts(async (step) => {
+ *   const user = await step(fetchUser('1'));
+ *   const posts = await step(fetchPosts(user.id));
+ *   return { user, posts };
+ * });
+ * // result.error: 'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // With destructuring in callback (optional but convenient)
+ * const result = await getPosts(async (step, { fetchUser, fetchPosts }) => {
+ *   const user = await step(fetchUser('1'));
+ *   const posts = await step(fetchPosts(user.id));
+ *   return { user, posts };
+ * });
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // Strict mode - closed error union (no UnexpectedError)
+ * const getPosts = createWorkflow(
+ *   { fetchUser, fetchPosts },
+ *   {
+ *     strict: true,
+ *     catchUnexpected: () => 'UNEXPECTED' as const
+ *   }
+ * );
+ * // result.error: 'NOT_FOUND' | 'FETCH_ERROR' | 'UNEXPECTED' (exactly)
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // With step caching
+ * const cache = new Map<string, Result<unknown, unknown>>();
+ * const workflow = createWorkflow({ fetchUser }, { cache });
+ *
+ * const result = await workflow(async (step) => {
+ *   // First call executes fetchUser
+ *   const user1 = await step(() => fetchUser('1'), { key: 'user:1' });
+ *   // Second call with same key uses cache (fetchUser not called again)
+ *   const user2 = await step(() => fetchUser('1'), { key: 'user:1' });
+ *   return user1; // user1 === user2
+ * });
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // With event stream for observability
+ * const workflow = createWorkflow({ fetchUser }, {
+ *   onEvent: (event) => {
+ *     if (event.type === 'step_start') {
+ *       console.log(`Step ${event.name} started`);
+ *     }
+ *     if (event.type === 'step_success') {
+ *       console.log(`Step ${event.name} completed in ${event.durationMs}ms`);
+ *     }
+ *   }
+ * });
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // With resume state for workflow replay
+ * const savedState = { steps: new Map([['user:1', { result: ok({ id: '1', name: 'Alice' }) }]]) };
+ * const workflow = createWorkflow({ fetchUser }, { resumeState: savedState });
+ *
+ * const result = await workflow(async (step) => {
+ *   // This step uses cached result from savedState (fetchUser not called)
+ *   const user = await step(() => fetchUser('1'), { key: 'user:1' });
+ *   return user;
+ * });
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // With typed arguments (new API)
+ * const workflow = createWorkflow({ fetchUser, fetchPosts });
+ *
+ * const result = await workflow(
+ *   { userId: '1' }, // Typed arguments
+ *   async (step, { fetchUser, fetchPosts }, { userId }) => {
+ *     const user = await step(fetchUser(userId));
+ *     const posts = await step(fetchPosts(user.id));
+ *     return { user, posts };
+ *   }
+ * );
+ * ```
+ */
+export function createWorkflow<
+  const Deps extends Readonly<Record<string, AnyResultFn>>,
+  C = void
+>(
+  deps: Deps,
+  options?: WorkflowOptions<ErrorsOfDeps<Deps>, C>
+): Workflow<ErrorsOfDeps<Deps>, Deps>;
+
+export function createWorkflow<
+  const Deps extends Readonly<Record<string, AnyResultFn>>,
+  U,
+  C = void
+>(
+  deps: Deps,
+  options: WorkflowOptionsStrict<ErrorsOfDeps<Deps>, U, C>
+): WorkflowStrict<ErrorsOfDeps<Deps>, U, Deps>;
+
+// Implementation
+export function createWorkflow<
+  const Deps extends Readonly<Record<string, AnyResultFn>>,
+  U = never,
+  C = void
+>(
+  deps: Deps,
+  options?: WorkflowOptions<ErrorsOfDeps<Deps>, C> | WorkflowOptionsStrict<ErrorsOfDeps<Deps>, U, C>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): any {
+  type E = ErrorsOfDeps<Deps>;
+
+  // Overloaded workflow executor function
+  // Signature 1: No args (original API)
+  function workflowExecutor<T>(
+    fn: (step: RunStep<E>, deps: Deps) => T | Promise<T>
+  ): Promise<Result<T, E | U | UnexpectedError, unknown>>;
+  // Signature 2: With args (new API)
+  function workflowExecutor<T, Args>(
+    args: Args,
+    fn: (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>
+  ): Promise<Result<T, E | U | UnexpectedError, unknown>>;
+  // Implementation
+  async function workflowExecutor<T, Args = undefined>(
+    fnOrArgs: ((step: RunStep<E>, deps: Deps) => T | Promise<T>) | Args,
+    maybeFn?: (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>
+  ): Promise<Result<T, E | U | UnexpectedError, unknown>> {
+    // Detect calling pattern: if second arg is a function, first arg is args
+    // This correctly handles functions as args (e.g., workflow(requestFactory, callback))
+    const hasArgs = typeof maybeFn === "function";
+    const args = hasArgs ? (fnOrArgs as Args) : undefined;
+    const userFn = hasArgs
+      ? maybeFn
+      : (fnOrArgs as (step: RunStep<E>, deps: Deps) => T | Promise<T>);
+    // Generate workflowId for this run
+    const workflowId = crypto.randomUUID();
+
+    // Create context for this run
+    const context = options?.createContext?.() as C;
+
+    // Helper to emit workflow events
+    const emitEvent = (event: WorkflowEvent<E | U | UnexpectedError>) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (options as any)?.onEvent?.(event, context);
+    };
+
+    // Emit workflow_start
+    const startTs = Date.now();
+    const startTime = performance.now();
+    emitEvent({
+      type: "workflow_start",
+      workflowId,
+      ts: startTs,
+    });
+
+    // Get cache from options (or create one if resumeState is provided)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const resumeStateOption = (options as any)?.resumeState as
+      | ResumeState
+      | (() => ResumeState | Promise<ResumeState>)
+      | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let cache = (options as any)?.cache as StepCache | undefined;
+
+    // If resumeState is provided but cache isn't, auto-create an in-memory cache
+    if (resumeStateOption && !cache) {
+      cache = new Map<string, Result<unknown, unknown, unknown>>();
+    }
+
+    // Pre-populate cache from resumeState
+    if (resumeStateOption && cache) {
+      const resumeState =
+        typeof resumeStateOption === "function"
+          ? await resumeStateOption()
+          : resumeStateOption;
+
+      for (const [key, entry] of resumeState.steps) {
+        const { result, meta } = entry;
+        if (result.ok) {
+          cache.set(key, result);
+        } else {
+          // Encode error results with metadata for proper replay
+          // Use provided meta if available, otherwise default to origin:"result"
+          const effectiveMeta = meta ?? { origin: "result" as const, resultCause: result.cause };
+          // Preserve original cause alongside metadata
+          cache.set(key, encodeCachedError(result.error, effectiveMeta, result.cause));
+        }
+      }
+    }
+
+    // Helper to parse step options
+    const parseStepOptions = (opts?: StepOptions | string): { name?: string; key?: string } => {
+      if (typeof opts === "string") return { name: opts };
+      return opts ?? {};
+    };
+
+    // Create a cached step wrapper
+    const createCachedStep = (realStep: RunStep<E>): RunStep<E> => {
+      if (!cache) {
+        // No cache configured, just return real step
+        return realStep;
+      }
+
+      // Wrap the main step function
+      const cachedStepFn = async <StepT, StepE extends E, StepC = unknown>(
+        operationOrResult:
+          | (() => Result<StepT, StepE, StepC> | AsyncResult<StepT, StepE, StepC>)
+          | Result<StepT, StepE, StepC>
+          | AsyncResult<StepT, StepE, StepC>,
+        stepOptions?: StepOptions | string
+      ): Promise<StepT> => {
+        const { name, key } = parseStepOptions(stepOptions);
+
+        // Only use cache if key is provided
+        if (key && cache.has(key)) {
+          // Cache hit
+          emitEvent({
+            type: "step_cache_hit",
+            workflowId,
+            stepKey: key,
+            name,
+            ts: Date.now(),
+          });
+
+          const cached = cache.get(key)!;
+          if (cached.ok) {
+            return cached.value as StepT;
+          }
+          // Cached error - throw early exit with preserved metadata (origin + cause)
+          // This bypasses realStep to avoid replaying step_start/step_error events
+          const meta = decodeCachedMeta(cached.cause);
+          throw createEarlyExit(cached.error as StepE, meta);
+        }
+
+        // Cache miss - emit event if key was provided
+        if (key) {
+          emitEvent({
+            type: "step_cache_miss",
+            workflowId,
+            stepKey: key,
+            name,
+            ts: Date.now(),
+          });
+        }
+
+        // Execute the real step - wrap in function form to satisfy overload
+        const wrappedOp = typeof operationOrResult === "function"
+          ? operationOrResult
+          : () => operationOrResult;
+
+        try {
+          const value = await realStep(wrappedOp, stepOptions);
+          // Cache successful result if key provided
+          if (key) {
+            cache.set(key, ok(value));
+          }
+          return value;
+        } catch (thrown) {
+          // Cache error results with full metadata if key provided and this is an early exit
+          if (key && isEarlyExit(thrown)) {
+            const exit = thrown as EarlyExit<StepE>;
+            // Extract original cause from metadata for preservation
+            const originalCause =
+              exit.meta.origin === "result"
+                ? exit.meta.resultCause
+                : exit.meta.thrown;
+            cache.set(key, encodeCachedError(exit.error, exit.meta, originalCause));
+          }
+          throw thrown;
+        }
+      };
+
+      // Wrap step.try
+      cachedStepFn.try = async <StepT, Err extends E>(
+        operation: () => StepT | Promise<StepT>,
+        opts:
+          | { error: Err; name?: string; key?: string }
+          | { onError: (cause: unknown) => Err; name?: string; key?: string }
+      ): Promise<StepT> => {
+        const { name, key } = opts;
+
+        // Only use cache if key is provided
+        if (key && cache.has(key)) {
+          // Cache hit
+          emitEvent({
+            type: "step_cache_hit",
+            workflowId,
+            stepKey: key,
+            name,
+            ts: Date.now(),
+          });
+
+          const cached = cache.get(key)!;
+          if (cached.ok) {
+            return cached.value as StepT;
+          }
+          // Cached error - throw early exit with preserved metadata (origin + thrown)
+          // This bypasses realStep.try to avoid replaying instrumentation
+          const meta = decodeCachedMeta(cached.cause);
+          throw createEarlyExit(cached.error as Err, meta);
+        }
+
+        // Cache miss - emit event if key was provided
+        if (key) {
+          emitEvent({
+            type: "step_cache_miss",
+            workflowId,
+            stepKey: key,
+            name,
+            ts: Date.now(),
+          });
+        }
+
+        // Execute the real step.try
+        try {
+          const value = await realStep.try(operation, opts);
+          // Cache successful result if key provided
+          if (key) {
+            cache.set(key, ok(value));
+          }
+          return value;
+        } catch (thrown) {
+          // Cache error results with full metadata if key provided and this is an early exit
+          if (key && isEarlyExit(thrown)) {
+            const exit = thrown as EarlyExit<Err>;
+            // Extract original cause from metadata for preservation
+            const originalCause =
+              exit.meta.origin === "result"
+                ? exit.meta.resultCause
+                : exit.meta.thrown;
+            cache.set(key, encodeCachedError(exit.error, exit.meta, originalCause));
+          }
+          throw thrown;
+        }
+      };
+
+      return cachedStepFn as RunStep<E>;
+    };
+
+    // Wrap the user's callback to pass cached step, deps, and args (when present)
+    const wrappedFn = hasArgs
+      ? (step: RunStep<E>) => (userFn as (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>)(createCachedStep(step), deps, args as Args)
+      : (step: RunStep<E>) => (userFn as (step: RunStep<E>, deps: Deps) => T | Promise<T>)(createCachedStep(step), deps);
+
+    let result: Result<T, E | U | UnexpectedError, unknown>;
+
+    if (options?.strict === true) {
+      // Strict mode - use run.strict for closed error union
+      const strictOptions = options as WorkflowOptionsStrict<E, U, C>;
+      result = await run.strict<T, E | U, C>(wrappedFn as (step: RunStep<E | U>) => Promise<T> | T, {
+        onError: strictOptions.onError,
+        onEvent: strictOptions.onEvent as ((event: WorkflowEvent<E | U | UnexpectedError>, ctx: C) => void) | undefined,
+        catchUnexpected: strictOptions.catchUnexpected,
+        workflowId,
+        context,
+      });
+    } else {
+      // Non-strict mode - use run with onError for typed errors + UnexpectedError
+      const normalOptions = options as WorkflowOptions<E, C> | undefined;
+      result = await run<T, E, C>(wrappedFn as (step: RunStep<E | UnexpectedError>) => Promise<T> | T, {
+        onError: normalOptions?.onError ?? (() => {}),
+        onEvent: normalOptions?.onEvent,
+        workflowId,
+        context,
+      });
+    }
+
+    // Emit workflow_success or workflow_error
+    const durationMs = performance.now() - startTime;
+    if (result.ok) {
+      emitEvent({
+        type: "workflow_success",
+        workflowId,
+        ts: Date.now(),
+        durationMs,
+      });
+    } else {
+      emitEvent({
+        type: "workflow_error",
+        workflowId,
+        ts: Date.now(),
+        durationMs,
+        error: result.error,
+      });
+    }
+
+    return result;
+  }
+
+  return workflowExecutor;
+}
+
+// =============================================================================
+// Type Guard Helpers
+// =============================================================================
+
+/**
+ * Type guard to check if an event is a step_complete event.
+ * Use this to filter events for state persistence.
+ *
+ * @param event - The workflow event to check
+ * @returns `true` if the event is a step_complete event, `false` otherwise
+ *
+ * @example
+ * ```typescript
+ * const savedSteps = new Map<string, Result<unknown, unknown>>();
+ *
+ * const workflow = createWorkflow({ fetchUser }, {
+ *   onEvent: (event) => {
+ *     if (isStepComplete(event)) {
+ *       savedSteps.set(event.stepKey, event.result);
+ *     }
+ *   }
+ * });
+ * ```
+ */
+export function isStepComplete(
+  event: WorkflowEvent<unknown>
+): event is Extract<WorkflowEvent<unknown>, { type: "step_complete" }> {
+  return event.type === "step_complete";
+}
+
+// =============================================================================
+// Human-in-the-Loop (HITL) Support
+// =============================================================================
+
+/**
+ * Standard error type for steps awaiting human approval.
+ * Use this as the error type for approval-gated steps.
+ *
+ * @example
+ * const requireApproval = async (userId: string): AsyncResult<Approval, PendingApproval> => {
+ *   const status = await checkApprovalStatus(userId);
+ *   if (status === 'pending') {
+ *     return err({ type: 'PENDING_APPROVAL', stepKey: `approval:${userId}` });
+ *   }
+ *   return ok(status.approval);
+ * };
+ */
+export type PendingApproval = {
+  type: "PENDING_APPROVAL";
+  /** Step key for correlation when resuming */
+  stepKey: string;
+  /** Optional reason for the pending state */
+  reason?: string;
+  /** Optional metadata for the approval request */
+  metadata?: Record<string, unknown>;
+};
+
+/**
+ * Error returned when approval is rejected.
+ */
+export type ApprovalRejected = {
+  type: "APPROVAL_REJECTED";
+  /** Step key for correlation */
+  stepKey: string;
+  /** Reason the approval was rejected */
+  reason: string;
+};
+
+/**
+ * Type guard to check if an error is a PendingApproval.
+ *
+ * @param error - The error to check
+ * @returns `true` if the error is a PendingApproval, `false` otherwise
+ *
+ * @example
+ * ```typescript
+ * const result = await workflow(...);
+ * if (!result.ok && isPendingApproval(result.error)) {
+ *   console.log(`Waiting for approval: ${result.error.stepKey}`);
+ * }
+ * ```
+ */
+export function isPendingApproval(error: unknown): error is PendingApproval {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as PendingApproval).type === "PENDING_APPROVAL"
+  );
+}
+
+/**
+ * Type guard to check if an error is an ApprovalRejected.
+ *
+ * @param error - The error to check
+ * @returns `true` if the error is an ApprovalRejected, `false` otherwise
+ */
+export function isApprovalRejected(error: unknown): error is ApprovalRejected {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as ApprovalRejected).type === "APPROVAL_REJECTED"
+  );
+}
+
+/**
+ * Create a PendingApproval error result.
+ * Convenience helper for approval-gated steps.
+ *
+ * @param stepKey - Stable key for this approval step (used for resume)
+ * @param options - Optional reason and metadata for the pending approval
+ * @returns A Result with a PendingApproval error
+ *
+ * @example
+ * ```typescript
+ * const requireApproval = async (userId: string) => {
+ *   const status = await db.getApproval(userId);
+ *   if (!status) return pendingApproval(`approval:${userId}`);
+ *   return ok(status);
+ * };
+ * ```
+ */
+export function pendingApproval(
+  stepKey: string,
+  options?: { reason?: string; metadata?: Record<string, unknown> }
+): Result<never, PendingApproval> {
+  return err({
+    type: "PENDING_APPROVAL",
+    stepKey,
+    reason: options?.reason,
+    metadata: options?.metadata,
+  });
+}
+
+/**
+ * Options for creating an approval-gated step.
+ */
+export interface ApprovalStepOptions<T> {
+  /** Stable key for this approval step (used for resume) */
+  key: string;
+  /** Function to check current approval status from external source */
+  checkApproval: () => Promise<
+    | { status: "pending" }
+    | { status: "approved"; value: T }
+    | { status: "rejected"; reason: string }
+  >;
+  /** Optional reason shown when pending */
+  pendingReason?: string;
+  /** Optional metadata for the approval request */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Create a Result-returning function that checks external approval status.
+ *
+ * ## When to Use
+ *
+ * Use `createApprovalStep` when you need:
+ * - **Human-in-the-loop workflows**: Steps that require human approval
+ * - **External approval systems**: Integrate with approval databases/APIs
+ * - **Workflow pausing**: Workflows that pause and resume after approval
+ * - **Approval tracking**: Track who approved what and when
+ *
+ * ## Why Use This Instead of Manual Approval Checks
+ *
+ * - **Standardized pattern**: Consistent approval step interface
+ * - **Type-safe**: Returns typed `PendingApproval` or `ApprovalRejected` errors
+ * - **Resume-friendly**: Works seamlessly with `injectApproval()` and resume state
+ * - **Metadata support**: Can include approval reason and metadata
+ *
+ * ## How It Works
+ *
+ * 1. Create approval step with `checkApproval` function
+ * 2. `checkApproval` returns one of:
+ *    - `{ status: 'pending' }` - Approval not yet granted (workflow pauses)
+ *    - `{ status: 'approved', value: T }` - Approval granted (workflow continues)
+ *    - `{ status: 'rejected', reason: string }` - Approval rejected (workflow fails)
+ * 3. Use in workflow with `step()` - workflow pauses if pending
+ * 4. When approval granted externally, use `injectApproval()` to resume
+ *
+ * ## Typical Approval Flow
+ *
+ * 1. Workflow executes → reaches approval step
+ * 2. `checkApproval()` called → returns `{ status: 'pending' }`
+ * 3. Workflow returns `PendingApproval` error
+ * 4. Save workflow state → persist for later resume
+ * 5. Show approval UI → user sees pending approval
+ * 6. User grants/rejects → update approval system
+ * 7. Inject approval → call `injectApproval()` with approved value
+ * 8. Resume workflow → continue from approval step
+ *
+ * @param options - Configuration for the approval step:
+ *   - `key`: Stable key for this approval (must match step key in workflow)
+ *   - `checkApproval`: Async function that checks current approval status
+ *   - `pendingReason`: Optional reason shown when approval is pending
+ *   - `metadata`: Optional metadata attached to the approval request
+ *
+ * @returns A function that returns an AsyncResult checking approval status.
+ *          The function can be used directly with `step()` in workflows.
+ *
+ * @example
+ * ```typescript
+ * // Create approval step that checks database
+ * const requireManagerApproval = createApprovalStep<{ approvedBy: string }>({
+ *   key: 'manager-approval',
+ *   checkApproval: async () => {
+ *     const approval = await db.getApproval('manager-approval');
+ *     if (!approval) {
+ *       return { status: 'pending' }; // Workflow pauses here
+ *     }
+ *     if (approval.rejected) {
+ *       return { status: 'rejected', reason: approval.reason };
+ *     }
+ *     return {
+ *       status: 'approved',
+ *       value: { approvedBy: approval.approvedBy }
+ *     };
+ *   },
+ *   pendingReason: 'Waiting for manager approval',
+ * });
+ *
+ * // Use in workflow
+ * const workflow = createWorkflow({ requireManagerApproval });
+ * const result = await workflow(async (step) => {
+ *   const approval = await step(requireManagerApproval, { key: 'manager-approval' });
+ *   // If pending, workflow exits with PendingApproval error
+ *   // If approved, continues with approval value
+ *   return approval;
+ * });
+ *
+ * // Handle pending state
+ * if (!result.ok && isPendingApproval(result.error)) {
+ *   // Workflow paused - show approval UI
+ *   showApprovalUI(result.error.stepKey);
+ * }
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // With approval injection for resume
+ * const collector = createHITLCollector();
+ * const workflow = createWorkflow({ requireApproval }, {
+ *   onEvent: collector.handleEvent,
+ * });
+ *
+ * const result = await workflow(async (step) => {
+ *   const approval = await step(requireApproval, { key: 'approval:1' });
+ *   return approval;
+ * });
+ *
+ * // When approval granted externally
+ * if (collector.hasPendingApprovals()) {
+ *   const resumeState = collector.injectApproval('approval:1', {
+ *     approvedBy: 'admin@example.com'
+ *   });
+ *
+ *   // Resume workflow
+ *   const workflow2 = createWorkflow({ requireApproval }, { resumeState });
+ *   const result2 = await workflow2(async (step) => {
+ *     const approval = await step(requireApproval, { key: 'approval:1' });
+ *     return approval; // Now succeeds with injected value
+ *   });
+ * }
+ * ```
+ */
+export function createApprovalStep<T>(
+  options: ApprovalStepOptions<T>
+): () => AsyncResult<T, PendingApproval | ApprovalRejected> {
+  return async (): AsyncResult<T, PendingApproval | ApprovalRejected> => {
+    const result = await options.checkApproval();
+
+    switch (result.status) {
+      case "pending":
+        return err({
+          type: "PENDING_APPROVAL",
+          stepKey: options.key,
+          reason: options.pendingReason,
+          metadata: options.metadata,
+        });
+      case "rejected":
+        return err({
+          type: "APPROVAL_REJECTED",
+          stepKey: options.key,
+          reason: result.reason,
+        });
+      case "approved":
+        return ok(result.value);
+    }
+  };
+}
+
+// =============================================================================
+// Resume State Helpers for HITL
+// =============================================================================
+
+/**
+ * Inject an approved value into resume state.
+ * Use this when an external approval is granted and you want to resume the workflow.
+ *
+ * @param state - The resume state to update
+ * @param options - Object with stepKey and the approved value
+ * @returns A new ResumeState with the approval injected
+ *
+ * @example
+ * ```typescript
+ * // When approval is granted externally:
+ * const updatedState = injectApproval(savedState, {
+ *   stepKey: 'deploy:prod',
+ *   value: { approvedBy: 'admin', approvedAt: Date.now() }
+ * });
+ *
+ * // Resume workflow with the approval injected
+ * const workflow = createWorkflow({ ... }, { resumeState: updatedState });
+ * ```
+ */
+export function injectApproval<T>(
+  state: ResumeState,
+  options: { stepKey: string; value: T }
+): ResumeState {
+  const newSteps = new Map(state.steps);
+  newSteps.set(options.stepKey, {
+    result: ok(options.value),
+  });
+  return { steps: newSteps };
+}
+
+/**
+ * Remove a step from resume state (e.g., to force re-execution).
+ *
+ * @param state - The resume state to update
+ * @param stepKey - The key of the step to remove
+ * @returns A new ResumeState with the step removed
+ *
+ * @example
+ * ```typescript
+ * // Force a step to re-execute on resume
+ * const updatedState = clearStep(savedState, 'approval:123');
+ * ```
+ */
+export function clearStep(state: ResumeState, stepKey: string): ResumeState {
+  const newSteps = new Map(state.steps);
+  newSteps.delete(stepKey);
+  return { steps: newSteps };
+}
+
+/**
+ * Check if a step in resume state has a pending approval error.
+ *
+ * @param state - The resume state to check
+ * @param stepKey - The key of the step to check
+ * @returns `true` if the step has a pending approval, `false` otherwise
+ *
+ * @example
+ * ```typescript
+ * if (hasPendingApproval(savedState, 'deploy:prod')) {
+ *   // Show approval UI
+ * }
+ * ```
+ */
+export function hasPendingApproval(
+  state: ResumeState,
+  stepKey: string
+): boolean {
+  const entry = state.steps.get(stepKey);
+  if (!entry || entry.result.ok) return false;
+  return isPendingApproval(entry.result.error);
+}
+
+/**
+ * Get all pending approval step keys from resume state.
+ *
+ * @param state - The resume state to check
+ * @returns Array of step keys that have pending approvals
+ *
+ * @example
+ * ```typescript
+ * const pendingKeys = getPendingApprovals(savedState);
+ * // ['deploy:prod', 'deploy:staging']
+ * ```
+ */
+export function getPendingApprovals(state: ResumeState): string[] {
+  const pending: string[] = [];
+  for (const [key, entry] of state.steps) {
+    if (!entry.result.ok && isPendingApproval(entry.result.error)) {
+      pending.push(key);
+    }
+  }
+  return pending;
+}
+
+// =============================================================================
+// Enhanced Collector for HITL
+// =============================================================================
+
+/**
+ * Extended step collector that tracks pending approvals.
+ * Use this for HITL workflows that need to track approval state.
+ *
+ * @returns An object with methods to handle events, get state, and manage approvals
+ *
+ * @example
+ * ```typescript
+ * const collector = createHITLCollector();
+ *
+ * const workflow = createWorkflow({ fetchUser, requireApproval }, {
+ *   onEvent: collector.handleEvent,
+ * });
+ *
+ * const result = await workflow(async (step) => {
+ *   const user = await step(() => fetchUser("1"), { key: "user:1" });
+ *   const approval = await step(requireApproval, { key: "approval:1" });
+ *   return { user, approval };
+ * });
+ *
+ * // Check for pending approvals
+ * if (collector.hasPendingApprovals()) {
+ *   const pending = collector.getPendingApprovals();
+ *   // pending: [{ stepKey: 'approval:1', error: PendingApproval }]
+ *   await saveToDatabase(collector.getState());
+ * }
+ *
+ * // Later, when approved:
+ * const resumeState = collector.injectApproval('approval:1', { approvedBy: 'admin' });
+ * ```
+ */
+export function createHITLCollector(): {
+  /** Handle workflow events (pass to onEvent option) */
+  handleEvent: (event: WorkflowEvent<unknown>) => void;
+  /** Get collected resume state */
+  getState: () => ResumeState;
+  /** Clear all collected state */
+  clear: () => void;
+  /** Check if any steps have pending approvals */
+  hasPendingApprovals: () => boolean;
+  /** Get all pending approval entries with their errors */
+  getPendingApprovals: () => Array<{ stepKey: string; error: PendingApproval }>;
+  /** Inject an approval result, updating the collector's internal state. Returns a copy for use as resumeState. */
+  injectApproval: <T>(stepKey: string, value: T) => ResumeState;
+} {
+  const steps = new Map<string, ResumeStateEntry>();
+
+  return {
+    handleEvent: (event: WorkflowEvent<unknown>) => {
+      if (isStepComplete(event)) {
+        steps.set(event.stepKey, { result: event.result, meta: event.meta });
+      }
+    },
+    getState: () => ({ steps: new Map(steps) }),
+    clear: () => steps.clear(),
+    hasPendingApprovals: () => {
+      for (const entry of steps.values()) {
+        if (!entry.result.ok && isPendingApproval(entry.result.error)) {
+          return true;
+        }
+      }
+      return false;
+    },
+    getPendingApprovals: () => {
+      const pending: Array<{ stepKey: string; error: PendingApproval }> = [];
+      for (const [key, entry] of steps) {
+        if (!entry.result.ok && isPendingApproval(entry.result.error)) {
+          pending.push({ stepKey: key, error: entry.result.error as PendingApproval });
+        }
+      }
+      return pending;
+    },
+    injectApproval: <T>(stepKey: string, value: T): ResumeState => {
+      // Mutate internal state so collector reflects the approval
+      steps.set(stepKey, { result: ok(value) });
+      // Return a copy for use as resumeState
+      return { steps: new Map(steps) };
+    },
+  };
+}

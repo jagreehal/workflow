@@ -177,14 +177,17 @@ export const isUnexpectedError = (e: unknown): e is UnexpectedError =>
 type AnyFunction = (...args: never[]) => unknown;
 
 /**
+ * Helper to extract the error type from Result or AsyncResult return values.
+ * Works even when a function is declared to return a union of both forms.
+ */
+type ErrorOfReturn<R> = Extract<Awaited<R>, { ok: false }> extends { error: infer E }
+  ? E
+  : never;
+
+/**
  * Extract error type from a single function's return type
  */
-export type ErrorOf<T extends AnyFunction> =
-  ReturnType<T> extends Result<unknown, infer E, unknown>
-    ? E
-    : ReturnType<T> extends Promise<Result<unknown, infer E, unknown>>
-      ? E
-      : never;
+export type ErrorOf<T extends AnyFunction> = ErrorOfReturn<ReturnType<T>>;
 
 /**
  * Extract union of error types from multiple functions
@@ -215,14 +218,17 @@ export type ExtractCause<T> = T extends { ok: false; cause?: infer C }
   : never;
 
 /**
+ * Helper to extract the cause type from Result or AsyncResult return values.
+ * Works even when a function is declared to return a union of both forms.
+ */
+type CauseOfReturn<R> = Extract<Awaited<R>, { ok: false }> extends { cause?: infer C }
+  ? C
+  : never;
+
+/**
  * Extract cause type from a function's return type
  */
-export type CauseOf<T extends AnyFunction> =
-  ReturnType<T> extends Result<unknown, unknown, infer C>
-    ? C
-    : ReturnType<T> extends Promise<Result<unknown, unknown, infer C>>
-      ? C
-      : never;
+export type CauseOf<T extends AnyFunction> = CauseOfReturn<ReturnType<T>>;
 
 // =============================================================================
 // Step Options

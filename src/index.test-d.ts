@@ -94,6 +94,9 @@ function _test3() {
   type UserError = ErrorOf<typeof fetchUser>;
   expectType<"NOT_FOUND">({} as UserError);
 
+  type ValidateError = ErrorOf<typeof validateUser>;
+  expectType<"INVALID_USER">({} as ValidateError);
+
   // Multiple functions
   type CombinedErrors = Errors<[typeof fetchUser, typeof fetchPosts]>;
   expectType<"NOT_FOUND" | "FETCH_ERROR">({} as CombinedErrors);
@@ -330,6 +333,46 @@ function _test12() {
   type Extracted = ErrorsOfDeps<Deps>;
 
   expectType<"NOT_FOUND" | "FETCH_ERROR">({} as Extracted);
+}
+
+// =============================================================================
+// TEST 12B: createWorkflow infers errors from MaybeAsyncResult-returning deps
+// =============================================================================
+
+async function _test12b() {
+  type BeneficiaryServiceError = { code: string; message: string };
+  type MaybeAsync<T> = Result<T, BeneficiaryServiceError> | AsyncResult<T, BeneficiaryServiceError>;
+
+  const beneficiaryDeps: {
+    validatePayload: (input: { id: string }) => MaybeAsync<{ id: string }>;
+    executeTransaction: (input: { id: string }) => MaybeAsync<boolean>;
+  } = {
+    validatePayload: (input) => {
+      if (!input.id) {
+        return err({ code: "INVALID", message: "Missing id" } satisfies BeneficiaryServiceError);
+      }
+      return ok(input) as Result<{ id: string }, BeneficiaryServiceError>;
+    },
+    executeTransaction: async () =>
+      ok(true) as Result<boolean, BeneficiaryServiceError>,
+  };
+
+  type BeneficiaryErrors = ErrorsOfDeps<typeof beneficiaryDeps>;
+  expectType<BeneficiaryServiceError>({} as BeneficiaryErrors);
+
+  const beneficiaryWorkflow = createWorkflow(beneficiaryDeps);
+
+  const result = await beneficiaryWorkflow(async (step, deps) => {
+    const valid = await step(deps.validatePayload({ id: "123" }));
+    const executed = await step(deps.executeTransaction(valid));
+    expectType<{ id: string }>(valid);
+    expectType<boolean>(executed);
+    return executed;
+  });
+
+  if (!result.ok) {
+    expectType<BeneficiaryServiceError | UnexpectedError>(result.error);
+  }
 }
 
 // =============================================================================

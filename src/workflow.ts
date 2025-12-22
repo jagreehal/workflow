@@ -264,8 +264,9 @@ export type AnyResultFn = (...args: any[]) => Result<any, any, any> | Promise<Re
  * Example: ErrorsOfDeps<{ fetchUser: typeof fetchUser, fetchPosts: typeof fetchPosts }>
  * yields: 'NOT_FOUND' | 'FETCH_ERROR'
  */
-export type ErrorsOfDeps<Deps extends Record<string, AnyResultFn>> =
-  ErrorOf<Deps[keyof Deps]>;
+export type ErrorsOfDeps<Deps extends Record<string, AnyResultFn>> = {
+  [K in keyof Deps]: ErrorOf<Deps[K]>;
+}[keyof Deps];
 
 /**
  * Extract union of cause types from a deps object.

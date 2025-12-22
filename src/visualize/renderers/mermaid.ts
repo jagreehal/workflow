@@ -34,7 +34,9 @@ function getStyleDefinitions(): string[] {
     "    classDef error fill:#fee2e2,stroke:#ef4444,color:#991b1b",
     "    classDef aborted fill:#f3f4f6,stroke:#6b7280,color:#4b5563",
     "    classDef cached fill:#dbeafe,stroke:#3b82f6,color:#1e40af",
-    "    classDef skipped fill:#f9fafb,stroke:#d1d5db,color:#6b7280,stroke-dasharray: 5 5",
+    // Note: Use a lighter fill color to distinguish skipped steps visually
+    // Mermaid classDef only supports: fill, stroke, color, stroke-width (without px unit)
+    "    classDef skipped fill:#f9fafb,stroke:#d1d5db,color:#6b7280",
   ];
 }
 
@@ -57,6 +59,42 @@ function generateNodeId(prefix: string = "node"): string {
 
 function resetNodeCounter(): void {
   nodeCounter = 0;
+}
+
+// =============================================================================
+// Mermaid Text Escaping
+// =============================================================================
+
+/**
+ * Escape text for use in Mermaid diagrams.
+ * Removes characters that break Mermaid parsing.
+ * 
+ * Characters removed:
+ * - {}[]() - Brackets and parentheses break parsing in labels
+ * - <> - Angle brackets can cause issues
+ * - " - Double quotes replaced with single quotes
+ * 
+ * @param text - Text to escape
+ * @returns Escaped text safe for Mermaid
+ */
+function escapeMermaidText(text: string): string {
+  return text
+    .replace(/[{}[\]()]/g, "") // Remove brackets and parentheses (they break parsing)
+    .replace(/[<>]/g, "") // Remove angle brackets
+    .replace(/"/g, "'") // Replace double quotes with single
+    .trim();
+}
+
+/**
+ * Escape text for use in Mermaid subgraph names.
+ * Subgraph names in brackets need special handling.
+ * 
+ * @param text - Text to escape for subgraph name
+ * @returns Escaped text safe for subgraph names
+ */
+function escapeSubgraphName(text: string): string {
+  return escapeMermaidText(text)
+    .replace(/[[\]]/g, ""); // Also remove brackets from subgraph names
 }
 
 // =============================================================================
@@ -156,26 +194,32 @@ function renderStepNode(
     ? `step_${node.key.replace(/[^a-zA-Z0-9]/g, "_")}`
     : generateNodeId("step");
 
-  const label = node.name ?? node.key ?? "Step";
+  const label = escapeMermaidText(node.name ?? node.key ?? "Step");
+  
+  // Format timing - use space instead of parentheses to avoid Mermaid parse errors
   const timing =
     options.showTimings && node.durationMs !== undefined
-      ? ` (${formatDuration(node.durationMs)})`
+      ? ` ${formatDuration(node.durationMs)}`
       : "";
 
   // Add input/output info if available
+  // Use newlines for multi-line labels, but escape special characters
   let ioInfo = "";
   if (node.input !== undefined) {
     const inputStr = typeof node.input === "string"
-      ? node.input
-      : JSON.stringify(node.input).slice(0, 20);
+      ? escapeMermaidText(node.input)
+      : escapeMermaidText(JSON.stringify(node.input).slice(0, 20));
     ioInfo += `\\nin: ${inputStr}`;
   }
   if (node.output !== undefined && node.state === "success") {
     const outputStr = typeof node.output === "string"
-      ? node.output
-      : JSON.stringify(node.output).slice(0, 20);
+      ? escapeMermaidText(node.output)
+      : escapeMermaidText(JSON.stringify(node.output).slice(0, 20));
     ioInfo += `\\nout: ${outputStr}`;
   }
+
+  // Combine all label parts
+  const escapedLabel = (label + ioInfo + timing).trim();
 
   const stateClass = getStateClass(node.state);
 
@@ -183,16 +227,16 @@ function renderStepNode(
   let shape: string;
   switch (node.state) {
     case "error":
-      shape = `{{${label}${ioInfo}${timing}}}`;
+      shape = `{{${escapedLabel}}}`;
       break;
     case "cached":
-      shape = `[(${label}${ioInfo}${timing})]`;
+      shape = `[(${escapedLabel})]`;
       break;
     case "skipped":
-      shape = `[${label}${ioInfo}${timing}]:::skipped`;
+      shape = `[${escapedLabel}]:::skipped`;
       break;
     default:
-      shape = `[${label}${ioInfo}${timing}]`;
+      shape = `[${escapedLabel}]`;
   }
 
   lines.push(`    ${id}${shape}:::${stateClass}`);
@@ -211,7 +255,7 @@ function renderParallelNode(
   const subgraphId = generateNodeId("parallel");
   const forkId = `${subgraphId}_fork`;
   const joinId = `${subgraphId}_join`;
-  const name = node.name ?? "Parallel";
+  const name = escapeSubgraphName(node.name ?? "Parallel");
 
   // Subgraph for parallel block
   lines.push(`    subgraph ${subgraphId}[${name}]`);
@@ -254,9 +298,9 @@ function renderRaceNode(
   const subgraphId = generateNodeId("race");
   const startId = `${subgraphId}_start`;
   const endId = `${subgraphId}_end`;
-  const name = node.name ?? "Race";
+  const name = escapeSubgraphName(node.name ?? "Race");
 
-  // Subgraph for race block
+  // Subgraph for race block - escape name and emoji is safe in quoted strings
   lines.push(`    subgraph ${subgraphId}["⚡ ${name}"]`);
   lines.push(`    direction TB`);
 
@@ -307,13 +351,15 @@ function renderDecisionNode(
     ? `decision_${node.key.replace(/[^a-zA-Z0-9]/g, "_")}`
     : generateNodeId("decision");
 
-  const condition = node.condition ?? "condition";
+  // Escape condition and decision value - remove characters that break Mermaid
+  const condition = escapeMermaidText(node.condition ?? "condition");
   const decisionValue = node.decisionValue !== undefined
-    ? ` = ${JSON.stringify(node.decisionValue).slice(0, 30)}`
+    ? ` = ${escapeMermaidText(String(node.decisionValue)).slice(0, 30)}`
     : "";
 
-  // Decision diamond
-  lines.push(`    ${decisionId}{${condition}${decisionValue}}`);
+  // Decision diamond - ensure no invalid characters
+  const decisionLabel = `${condition}${decisionValue}`.trim();
+  lines.push(`    ${decisionId}{${decisionLabel}}`);
 
   // Render branches
   const branchExitIds: string[] = [];
@@ -321,17 +367,23 @@ function renderDecisionNode(
 
   for (const branch of node.branches) {
     const branchId = `${decisionId}_${branch.label.replace(/[^a-zA-Z0-9]/g, "_")}`;
+    // Escape branch label - remove parentheses and other special chars
+    const branchLabelText = escapeMermaidText(branch.label);
     const branchLabel = branch.taken
-      ? `${branch.label} ✓`
-      : `${branch.label} ⊘ (skipped)`;
+      ? `${branchLabelText} ✓`
+      : `${branchLabelText} skipped`;
     const branchClass = branch.taken ? ":::success" : ":::skipped";
 
     // Branch label node
     lines.push(`    ${branchId}[${branchLabel}]${branchClass}`);
 
     // Connect decision to branch
-    const edgeLabel = branch.condition ? `|${branch.condition}|` : "";
-    lines.push(`    ${decisionId} -->|${edgeLabel}| ${branchId}`);
+    // Mermaid edge labels must be simple text - escape special characters
+    // Also remove pipe character as it's used for edge label syntax
+    const edgeLabel = branch.condition 
+      ? `|${escapeMermaidText(branch.condition).replace(/\|/g, "")}|` 
+      : "";
+    lines.push(`    ${decisionId} -->${edgeLabel} ${branchId}`);
 
     // Render children of this branch
     if (branch.children.length > 0) {

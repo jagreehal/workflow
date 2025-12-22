@@ -91,6 +91,7 @@ export {
   type RunStep,
   type StepOptions,
   type WorkflowEvent,
+  type ScopeType,
   type RunOptions,
   type RunOptionsWithCatch,
   type RunOptionsWithoutCatch,

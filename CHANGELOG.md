@@ -1,5 +1,11 @@
 # @jagreehal/workflow
 
+## 1.3.0
+
+### Minor Changes
+
+- f5269aa: Add documentation for composing workflows together. Workflows can be combined by calling one workflow from within another using `step()`, and error types automatically aggregate into a union.
+
 ## 1.2.0
 
 ### Minor Changes

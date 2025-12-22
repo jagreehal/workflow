@@ -40,6 +40,7 @@
     "test:watch": "vitest watch",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
+    "tsd": "tsd --files 'src/**/*.test-d.ts'",
     "clean": "rm -rf dist lib",
     "prebuild": "pnpm clean",
     "prepare": "pnpm build",

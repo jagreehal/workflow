@@ -96,6 +96,14 @@ export {
   type RunOptionsWithCatch,
   type RunOptionsWithoutCatch,
 
+  // Retry and timeout types
+  type BackoffStrategy,
+  type RetryOptions,
+  type TimeoutOptions,
+  type StepTimeoutError,
+  type StepTimeoutMarkerMeta,
+  STEP_TIMEOUT_MARKER,
+
   // Constructors
   ok,
   err,
@@ -104,6 +112,8 @@ export {
   isOk,
   isErr,
   isUnexpectedError,
+  isStepTimeoutError,
+  getStepTimeoutMeta,
 
   // Unwrap
   UnwrapError,

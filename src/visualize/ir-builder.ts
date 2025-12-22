@@ -56,6 +56,9 @@ interface ActiveStep {
   name?: string;
   key?: string;
   startTs: number;
+  retryCount: number;
+  timedOut: boolean;
+  timeoutMs?: number;
 }
 
 interface ActiveScope {
@@ -187,6 +190,8 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
           name: event.name,
           key: event.stepKey,
           startTs: event.ts,
+          retryCount: 0,
+          timedOut: false,
         });
         lastUpdatedAt = Date.now();
         break;
@@ -205,6 +210,8 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
             startTs: active.startTs,
             endTs: event.ts,
             durationMs: event.durationMs,
+            ...(active.retryCount > 0 && { retryCount: active.retryCount }),
+            ...(active.timedOut && { timedOut: true, timeoutMs: active.timeoutMs }),
           };
           addNode(node);
           activeSteps.delete(id);
@@ -226,6 +233,8 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
             endTs: event.ts,
             durationMs: event.durationMs,
             error: event.error,
+            ...(active.retryCount > 0 && { retryCount: active.retryCount }),
+            ...(active.timedOut && { timedOut: true, timeoutMs: active.timeoutMs }),
           };
           addNode(node);
           activeSteps.delete(id);
@@ -246,6 +255,8 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
             startTs: active.startTs,
             endTs: event.ts,
             durationMs: event.durationMs,
+            ...(active.retryCount > 0 && { retryCount: active.retryCount }),
+            ...(active.timedOut && { timedOut: true, timeoutMs: active.timeoutMs }),
           };
           addNode(node);
           activeSteps.delete(id);
@@ -277,6 +288,36 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
       case "step_complete":
         // step_complete is for state persistence, not visualization
         // We already handled the step via step_success/step_error
+        break;
+
+      case "step_timeout": {
+        // Timeout is an intermediate event - step may retry or will get step_error
+        // Track timeout info on the active step
+        const id = getStepId(event);
+        const active = activeSteps.get(id);
+        if (active) {
+          active.timedOut = true;
+          active.timeoutMs = event.timeoutMs;
+        }
+        lastUpdatedAt = Date.now();
+        break;
+      }
+
+      case "step_retry": {
+        // Retry is an intermediate event - increment retry counter
+        const id = getStepId(event);
+        const active = activeSteps.get(id);
+        if (active) {
+          active.retryCount = (event.attempt ?? 1) - 1; // attempt is 1-indexed, retryCount is 0-indexed
+        }
+        lastUpdatedAt = Date.now();
+        break;
+      }
+
+      case "step_retries_exhausted":
+        // All retries exhausted - step_error will follow
+        // The error state will be set by step_error handler
+        lastUpdatedAt = Date.now();
         break;
 
       case "step_skipped": {
@@ -439,6 +480,8 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
         key: active.key,
         state: "running",
         startTs: active.startTs,
+        ...(active.retryCount > 0 && { retryCount: active.retryCount }),
+        ...(active.timedOut && { timedOut: true, timeoutMs: active.timeoutMs }),
       });
     }
 

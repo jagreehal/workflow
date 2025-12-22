@@ -21,6 +21,11 @@
       "types": "./dist/workflow.d.ts",
       "import": "./dist/workflow.js",
       "require": "./dist/workflow.cjs"
+    },
+    "./visualize": {
+      "types": "./dist/visualize.d.ts",
+      "import": "./dist/visualize.js",
+      "require": "./dist/visualize.cjs"
     }
   },
   "files": [

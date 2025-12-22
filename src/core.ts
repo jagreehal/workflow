@@ -129,9 +129,11 @@ export const err = <E, C = unknown>(
  * ```typescript
  * const r = someOperation();
  * if (isOk(r)) {
- *   console.log(r.value); // Type is T
+ *   // Use r.value (Type is T)
+ *   processValue(r.value);
  * } else {
- *   console.error(r.error); // Type is E
+ *   // Handle r.error (Type is E)
+ *   handleError(r.error);
  * }
  * ```
  */
@@ -369,6 +371,73 @@ export interface RunStep<E = unknown> {
       | { error: Err; name?: string; key?: string }
       | { onError: (resultError: ResultE) => Err; name?: string; key?: string }
   ) => Promise<T>;
+
+  /**
+   * Execute a parallel operation (allAsync) with scope events for visualization.
+   *
+   * This wraps the operation with scope_start and scope_end events, enabling
+   * visualization of parallel execution branches.
+   *
+   * @param name - Name for this parallel block (used in visualization)
+   * @param operation - A function that returns a Result from allAsync or allSettledAsync
+   * @returns The success value (unwrapped array)
+   *
+   * @example
+   * ```typescript
+   * const [user, posts] = await step.parallel('Fetch all data', () =>
+   *   allAsync([fetchUser(id), fetchPosts(id)])
+   * );
+   * ```
+   */
+  parallel: <T, StepE extends E, StepC = unknown>(
+    name: string,
+    operation: () => Result<T[], StepE, StepC> | AsyncResult<T[], StepE, StepC>
+  ) => Promise<T[]>;
+
+  /**
+   * Execute a race operation (anyAsync) with scope events for visualization.
+   *
+   * This wraps the operation with scope_start and scope_end events, enabling
+   * visualization of racing execution branches.
+   *
+   * @param name - Name for this race block (used in visualization)
+   * @param operation - A function that returns a Result from anyAsync
+   * @returns The success value (first to succeed)
+   *
+   * @example
+   * ```typescript
+   * const data = await step.race('Fastest API', () =>
+   *   anyAsync([fetchFromPrimary(id), fetchFromFallback(id)])
+   * );
+   * ```
+   */
+  race: <T, StepE extends E, StepC = unknown>(
+    name: string,
+    operation: () => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>
+  ) => Promise<T>;
+
+  /**
+   * Execute an allSettled operation with scope events for visualization.
+   *
+   * This wraps the operation with scope_start and scope_end events, enabling
+   * visualization of allSettled execution branches. Unlike step.parallel,
+   * allSettled collects all results even if some fail.
+   *
+   * @param name - Name for this allSettled block (used in visualization)
+   * @param operation - A function that returns a Result from allSettledAsync
+   * @returns The success value (unwrapped array)
+   *
+   * @example
+   * ```typescript
+   * const [user, posts] = await step.allSettled('Fetch all data', () =>
+   *   allSettledAsync([fetchUser(id), fetchPosts(id)])
+   * );
+   * ```
+   */
+  allSettled: <T, StepE extends E, StepC = unknown>(
+    name: string,
+    operation: () => Result<T[], StepE, StepC> | AsyncResult<T[], StepE, StepC>
+  ) => Promise<T[]>;
 }
 
 // =============================================================================
@@ -383,17 +452,25 @@ export interface RunStep<E = unknown> {
  * preserves its original types, but the event type cannot statically represent them.
  * Use runtime checks or the meta field to interpret cause values.
  */
+/**
+ * Scope types for parallel and race operations.
+ */
+export type ScopeType = "parallel" | "race" | "allSettled";
+
 export type WorkflowEvent<E> =
   | { type: "workflow_start"; workflowId: string; ts: number }
   | { type: "workflow_success"; workflowId: string; ts: number; durationMs: number }
   | { type: "workflow_error"; workflowId: string; ts: number; durationMs: number; error: E }
-  | { type: "step_start"; workflowId: string; stepKey?: string; name?: string; ts: number }
-  | { type: "step_success"; workflowId: string; stepKey?: string; name?: string; ts: number; durationMs: number }
-  | { type: "step_error"; workflowId: string; stepKey?: string; name?: string; ts: number; durationMs: number; error: E }
-  | { type: "step_aborted"; workflowId: string; stepKey?: string; name?: string; ts: number; durationMs: number }
+  | { type: "step_start"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number }
+  | { type: "step_success"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number }
+  | { type: "step_error"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number; error: E }
+  | { type: "step_aborted"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number }
   | { type: "step_complete"; workflowId: string; stepKey: string; name?: string; ts: number; durationMs: number; result: Result<unknown, unknown, unknown>; meta?: StepFailureMeta }
   | { type: "step_cache_hit"; workflowId: string; stepKey: string; name?: string; ts: number }
-  | { type: "step_cache_miss"; workflowId: string; stepKey: string; name?: string; ts: number };
+  | { type: "step_cache_miss"; workflowId: string; stepKey: string; name?: string; ts: number }
+  | { type: "step_skipped"; workflowId: string; stepKey?: string; name?: string; reason?: string; decisionId?: string; ts: number }
+  | { type: "scope_start"; workflowId: string; scopeId: string; scopeType: ScopeType; name?: string; ts: number }
+  | { type: "scope_end"; workflowId: string; scopeId: string; ts: number; durationMs: number; winnerId?: string };
 
 // =============================================================================
 // Run Options
@@ -659,7 +736,36 @@ export async function run<T, E, C = void>(
   const workflowId = providedWorkflowId ?? crypto.randomUUID();
   const wrapMode = !onError && !catchUnexpected;
 
+  // Track active scopes as a stack for proper nesting
+  // When a step succeeds, only the innermost race scope gets the winner
+  const activeScopeStack: Array<{ scopeId: string; type: "race" | "parallel" | "allSettled"; winnerId?: string }> = [];
+
+  // Counter for generating unique step IDs
+  let stepIdCounter = 0;
+
+  // Generate a unique step ID
+  // Uses stepKey when provided (for cache stability), otherwise generates a unique ID.
+  // Note: name is NOT used for stepId because multiple concurrent steps may share a name,
+  // which would cause them to collide in activeSteps tracking and race winner detection.
+  const generateStepId = (stepKey?: string): string => {
+    return stepKey ?? `step_${++stepIdCounter}`;
+  };
+
   const emitEvent = (event: WorkflowEvent<E | UnexpectedError>) => {
+    // Track first successful step in the innermost race scope for winnerId
+    if (event.type === "step_success") {
+      // Use the stepId from the event (already generated at step start)
+      const stepId = event.stepId;
+
+      // Find innermost race scope (search from end of stack)
+      for (let i = activeScopeStack.length - 1; i >= 0; i--) {
+        const scope = activeScopeStack[i];
+        if (scope.type === "race" && !scope.winnerId) {
+          scope.winnerId = stepId;
+          break; // Only update innermost race scope
+        }
+      }
+    }
     onEvent?.(event, context as C);
   };
 
@@ -750,6 +856,7 @@ export async function run<T, E, C = void>(
     ): Promise<T> => {
       return (async () => {
         const { name: stepName, key: stepKey } = parseStepOptions(stepOptions);
+        const stepId = generateStepId(stepKey);
         const hasEventListeners = onEvent;
         const startTime = hasEventListeners ? performance.now() : 0;
 
@@ -757,6 +864,7 @@ export async function run<T, E, C = void>(
           emitEvent({
             type: "step_start",
             workflowId,
+            stepId,
             stepKey,
             name: stepName,
             ts: Date.now(),
@@ -774,6 +882,7 @@ export async function run<T, E, C = void>(
             emitEvent({
               type: "step_aborted",
               workflowId,
+              stepId,
               stepKey,
               name: stepName,
               ts: Date.now(),
@@ -794,6 +903,7 @@ export async function run<T, E, C = void>(
             emitEvent({
               type: "step_error",
               workflowId,
+              stepId,
               stepKey,
               name: stepName,
               ts: Date.now(),
@@ -825,6 +935,7 @@ export async function run<T, E, C = void>(
             emitEvent({
               type: "step_error",
               workflowId,
+              stepId,
               stepKey,
               name: stepName,
               ts: Date.now(),
@@ -856,6 +967,7 @@ export async function run<T, E, C = void>(
           emitEvent({
             type: "step_success",
             workflowId,
+            stepId,
             stepKey,
             name: stepName,
             ts: Date.now(),
@@ -884,6 +996,7 @@ export async function run<T, E, C = void>(
         emitEvent({
           type: "step_error",
           workflowId,
+          stepId,
           stepKey,
           name: stepName,
           ts: Date.now(),
@@ -920,6 +1033,7 @@ export async function run<T, E, C = void>(
     ): Promise<T> => {
       const stepName = opts.name;
       const stepKey = opts.key;
+      const stepId = generateStepId(stepKey);
       const mapToError = "error" in opts ? () => opts.error : opts.onError;
       const hasEventListeners = onEvent;
 
@@ -930,6 +1044,7 @@ export async function run<T, E, C = void>(
           emitEvent({
             type: "step_start",
             workflowId,
+            stepId,
             stepKey,
             name: stepName,
             ts: Date.now(),
@@ -942,6 +1057,7 @@ export async function run<T, E, C = void>(
           emitEvent({
             type: "step_success",
             workflowId,
+            stepId,
             stepKey,
             name: stepName,
             ts: Date.now(),
@@ -967,6 +1083,7 @@ export async function run<T, E, C = void>(
           emitEvent({
             type: "step_error",
             workflowId,
+            stepId,
             stepKey,
             name: stepName,
             ts: Date.now(),
@@ -1002,6 +1119,7 @@ export async function run<T, E, C = void>(
     ): Promise<T> => {
       const stepName = opts.name;
       const stepKey = opts.key;
+      const stepId = generateStepId(stepKey);
       const mapToError = "error" in opts ? () => opts.error : opts.onError;
       const hasEventListeners = onEvent;
 
@@ -1012,6 +1130,7 @@ export async function run<T, E, C = void>(
           emitEvent({
             type: "step_start",
             workflowId,
+            stepId,
             stepKey,
             name: stepName,
             ts: Date.now(),
@@ -1025,6 +1144,7 @@ export async function run<T, E, C = void>(
           emitEvent({
             type: "step_success",
             workflowId,
+            stepId,
             stepKey,
             name: stepName,
             ts: Date.now(),
@@ -1055,6 +1175,7 @@ export async function run<T, E, C = void>(
           emitEvent({
             type: "step_error",
             workflowId,
+            stepId,
             stepKey,
             name: stepName,
             ts: Date.now(),
@@ -1079,6 +1200,197 @@ export async function run<T, E, C = void>(
             origin: "result",
             resultCause: result.error,
           });
+        }
+      })();
+    };
+
+    // step.parallel: Execute a parallel operation with scope events
+    stepFn.parallel = <T, StepE, StepC>(
+      name: string,
+      operation: () => Result<T[], StepE, StepC> | AsyncResult<T[], StepE, StepC>
+    ): Promise<T[]> => {
+      const scopeId = `scope_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      return (async () => {
+        const startTime = performance.now();
+        let scopeEnded = false;
+
+        // Push this scope onto the stack for proper nesting tracking
+        activeScopeStack.push({ scopeId, type: "parallel" });
+
+        // Helper to emit scope_end exactly once
+        const emitScopeEnd = () => {
+          if (scopeEnded) return;
+          scopeEnded = true;
+          // Pop this scope from the stack
+          const idx = activeScopeStack.findIndex(s => s.scopeId === scopeId);
+          if (idx !== -1) activeScopeStack.splice(idx, 1);
+          emitEvent({
+            type: "scope_end",
+            workflowId,
+            scopeId,
+            ts: Date.now(),
+            durationMs: performance.now() - startTime,
+          });
+        };
+
+        // Emit scope_start event
+        emitEvent({
+          type: "scope_start",
+          workflowId,
+          scopeId,
+          scopeType: "parallel",
+          name,
+          ts: Date.now(),
+        });
+
+        try {
+          const result = await operation();
+
+          // Emit scope_end before processing result
+          emitScopeEnd();
+
+          if (!result.ok) {
+            onError?.(result.error as unknown as E, name);
+            throw earlyExit(result.error as unknown as E, {
+              origin: "result",
+              resultCause: result.cause,
+            });
+          }
+
+          return result.value;
+        } catch (error) {
+          // Always emit scope_end in finally-like fashion
+          emitScopeEnd();
+          throw error;
+        }
+      })();
+    };
+
+    // step.race: Execute a race operation with scope events
+    stepFn.race = <T, StepE, StepC>(
+      name: string,
+      operation: () => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>
+    ): Promise<T> => {
+      const scopeId = `scope_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      return (async () => {
+        const startTime = performance.now();
+        let scopeEnded = false;
+
+        // Push this race scope onto the stack to track the first successful step as winner
+        const scopeEntry = { scopeId, type: "race" as const, winnerId: undefined as string | undefined };
+        activeScopeStack.push(scopeEntry);
+
+        // Helper to emit scope_end exactly once, including winnerId
+        const emitScopeEnd = () => {
+          if (scopeEnded) return;
+          scopeEnded = true;
+          // Pop this scope from the stack
+          const idx = activeScopeStack.findIndex(s => s.scopeId === scopeId);
+          if (idx !== -1) activeScopeStack.splice(idx, 1);
+          emitEvent({
+            type: "scope_end",
+            workflowId,
+            scopeId,
+            ts: Date.now(),
+            durationMs: performance.now() - startTime,
+            winnerId: scopeEntry.winnerId,
+          });
+        };
+
+        // Emit scope_start event
+        emitEvent({
+          type: "scope_start",
+          workflowId,
+          scopeId,
+          scopeType: "race",
+          name,
+          ts: Date.now(),
+        });
+
+        try {
+          const result = await operation();
+
+          // Emit scope_end before processing result
+          emitScopeEnd();
+
+          if (!result.ok) {
+            onError?.(result.error as unknown as E, name);
+            throw earlyExit(result.error as unknown as E, {
+              origin: "result",
+              resultCause: result.cause,
+            });
+          }
+
+          return result.value;
+        } catch (error) {
+          // Always emit scope_end in finally-like fashion
+          emitScopeEnd();
+          throw error;
+        }
+      })();
+    };
+
+    // step.allSettled: Execute an allSettled operation with scope events
+    stepFn.allSettled = <T, StepE, StepC>(
+      name: string,
+      operation: () => Result<T[], StepE, StepC> | AsyncResult<T[], StepE, StepC>
+    ): Promise<T[]> => {
+      const scopeId = `scope_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      return (async () => {
+        const startTime = performance.now();
+        let scopeEnded = false;
+
+        // Push this scope onto the stack for proper nesting tracking
+        activeScopeStack.push({ scopeId, type: "allSettled" });
+
+        // Helper to emit scope_end exactly once
+        const emitScopeEnd = () => {
+          if (scopeEnded) return;
+          scopeEnded = true;
+          // Pop this scope from the stack
+          const idx = activeScopeStack.findIndex(s => s.scopeId === scopeId);
+          if (idx !== -1) activeScopeStack.splice(idx, 1);
+          emitEvent({
+            type: "scope_end",
+            workflowId,
+            scopeId,
+            ts: Date.now(),
+            durationMs: performance.now() - startTime,
+          });
+        };
+
+        // Emit scope_start event
+        emitEvent({
+          type: "scope_start",
+          workflowId,
+          scopeId,
+          scopeType: "allSettled",
+          name,
+          ts: Date.now(),
+        });
+
+        try {
+          const result = await operation();
+
+          // Emit scope_end before processing result
+          emitScopeEnd();
+
+          if (!result.ok) {
+            onError?.(result.error as unknown as E, name);
+            throw earlyExit(result.error as unknown as E, {
+              origin: "result",
+              resultCause: result.cause,
+            });
+          }
+
+          return result.value;
+        } catch (error) {
+          // Always emit scope_end in finally-like fashion
+          emitScopeEnd();
+          throw error;
         }
       })();
     };
@@ -1718,9 +2030,9 @@ export function mapError<T, E, F, C>(
  * });
  *
  * // Handle with cause
- * const log = match(result, {
- *   ok: (value) => console.log('Success:', value),
- *   err: (error, cause) => console.error('Error:', error, cause),
+ * const response = match(result, {
+ *   ok: (value) => ({ status: 'success', data: value }),
+ *   err: (error, cause) => ({ status: 'error', error, cause }),
  * });
  * ```
  */

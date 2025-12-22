@@ -794,6 +794,77 @@ export function createWorkflow<
         }
       };
 
+      // Wrap step.fromResult - delegate to real step (caching handled by key in opts)
+      cachedStepFn.fromResult = async <StepT, ResultE, Err extends E>(
+        operation: () => Result<StepT, ResultE, unknown> | AsyncResult<StepT, ResultE, unknown>,
+        opts:
+          | { error: Err; name?: string; key?: string }
+          | { onError: (resultError: ResultE) => Err; name?: string; key?: string }
+      ): Promise<StepT> => {
+        const { name, key } = opts;
+
+        // Only use cache if key is provided
+        if (key && cache.has(key)) {
+          // Cache hit
+          emitEvent({
+            type: "step_cache_hit",
+            workflowId,
+            stepKey: key,
+            name,
+            ts: Date.now(),
+          });
+
+          const cached = cache.get(key)!;
+          if (cached.ok) {
+            return cached.value as StepT;
+          }
+          // Cached error - throw early exit with preserved metadata
+          const meta = decodeCachedMeta(cached.cause);
+          throw createEarlyExit(cached.error as Err, meta);
+        }
+
+        // Cache miss - emit event if key was provided
+        if (key) {
+          emitEvent({
+            type: "step_cache_miss",
+            workflowId,
+            stepKey: key,
+            name,
+            ts: Date.now(),
+          });
+        }
+
+        // Execute the real step.fromResult
+        try {
+          const value = await realStep.fromResult(operation, opts);
+          // Cache successful result if key provided
+          if (key) {
+            cache.set(key, ok(value));
+          }
+          return value;
+        } catch (thrown) {
+          // Cache error results with full metadata if key provided and this is an early exit
+          if (key && isEarlyExit(thrown)) {
+            const exit = thrown as EarlyExit<Err>;
+            const originalCause =
+              exit.meta.origin === "result"
+                ? exit.meta.resultCause
+                : exit.meta.thrown;
+            cache.set(key, encodeCachedError(exit.error, exit.meta, originalCause));
+          }
+          throw thrown;
+        }
+      };
+
+      // Wrap step.parallel - delegate to real step (no caching for scope wrappers)
+      cachedStepFn.parallel = realStep.parallel;
+
+      // Wrap step.race - delegate to real step (no caching for scope wrappers)
+      cachedStepFn.race = realStep.race;
+
+      // Wrap step.allSettled - delegate to real step (no caching for scope wrappers)
+      cachedStepFn.allSettled = realStep.allSettled;
+
       return cachedStepFn as RunStep<E>;
     };
 

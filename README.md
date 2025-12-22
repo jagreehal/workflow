@@ -103,6 +103,92 @@ const result = await checkout(async (step) => {
 // result.error: 'UNAUTHORIZED' | 'ORDER_NOT_FOUND' | 'PAYMENT_FAILED' | UnexpectedError
 ```
 
+### Composing workflows
+
+You can combine multiple workflows together. The error types automatically aggregate:
+
+```typescript
+// Validation workflow
+const validateEmail = async (email: string): AsyncResult<string, 'INVALID_EMAIL'> =>
+  email.includes('@') ? ok(email) : err('INVALID_EMAIL');
+
+const validatePassword = async (pwd: string): AsyncResult<string, 'WEAK_PASSWORD'> =>
+  pwd.length >= 8 ? ok(pwd) : err('WEAK_PASSWORD');
+
+const validationWorkflow = createWorkflow({ validateEmail, validatePassword });
+
+// Checkout workflow (from example above)
+const authenticate = async (token: string): AsyncResult<{ userId: string }, 'UNAUTHORIZED'> =>
+  token === 'valid' ? ok({ userId: 'user-1' }) : err('UNAUTHORIZED');
+
+const fetchOrder = async (id: string): AsyncResult<{ total: number }, 'ORDER_NOT_FOUND'> =>
+  ok({ total: 99 });
+
+const chargeCard = async (amount: number): AsyncResult<{ txId: string }, 'PAYMENT_FAILED'> =>
+  ok({ txId: 'tx-123' });
+
+const checkoutWorkflow = createWorkflow({ authenticate, fetchOrder, chargeCard });
+
+// Composed workflow: validation + checkout
+// Include all dependencies from both workflows
+const validateAndCheckout = createWorkflow({
+  validateEmail,
+  validatePassword,
+  authenticate,
+  fetchOrder,
+  chargeCard,
+});
+
+const result = await validateAndCheckout(async (step, deps) => {
+  // Run validation workflow as a step (workflows return AsyncResult)
+  const validated = await step(() => validationWorkflow(async (innerStep) => {
+    const email = await innerStep(deps.validateEmail('user@example.com'));
+    const password = await innerStep(deps.validatePassword('secret123'));
+    return { email, password };
+  }));
+  
+  // Run checkout workflow as a step
+  const checkout = await step(() => checkoutWorkflow(async (innerStep) => {
+    const auth = await innerStep(deps.authenticate('valid'));
+    const order = await innerStep(deps.fetchOrder('order-1'));
+    const payment = await innerStep(deps.chargeCard(order.total));
+    return { userId: auth.userId, txId: payment.txId };
+  }));
+  
+  return { validated, checkout };
+});
+
+// result.error: 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'UNAUTHORIZED' | 'ORDER_NOT_FOUND' | 'PAYMENT_FAILED' | UnexpectedError
+// ↑ All error types from both workflows are automatically aggregated
+```
+
+**Alternative approach**: You can also combine workflows by including all their dependencies in a single workflow:
+
+```typescript
+// Simpler composition - combine all dependencies
+const composed = createWorkflow({
+  validateEmail,
+  validatePassword,
+  authenticate,
+  fetchOrder,
+  chargeCard,
+});
+
+const result = await composed(async (step, deps) => {
+  // Validation steps
+  const email = await step(deps.validateEmail('user@example.com'));
+  const password = await step(deps.validatePassword('secret123'));
+  
+  // Checkout steps
+  const auth = await step(deps.authenticate('valid'));
+  const order = await step(deps.fetchOrder('order-1'));
+  const payment = await step(deps.chargeCard(order.total));
+  
+  return { email, password, userId: auth.userId, txId: payment.txId };
+});
+// Same error union: 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'UNAUTHORIZED' | 'ORDER_NOT_FOUND' | 'PAYMENT_FAILED' | UnexpectedError
+```
+
 ### Wrapping throwing APIs with step.try
 
 ```typescript

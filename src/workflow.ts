@@ -19,6 +19,8 @@ import {
   type RunStep,
   type WorkflowEvent,
   type StepOptions,
+  type RetryOptions,
+  type TimeoutOptions,
   type ErrorOf,
   type CauseOf,
 } from "./core";
@@ -865,6 +867,48 @@ export function createWorkflow<
 
       // Wrap step.allSettled - delegate to real step (no caching for scope wrappers)
       cachedStepFn.allSettled = realStep.allSettled;
+
+      // Wrap step.retry - use cachedStepFn to ensure caching/resume works with keyed steps
+      cachedStepFn.retry = <StepT, StepE extends E, StepC = unknown>(
+        operation: () => Result<StepT, StepE, StepC> | AsyncResult<StepT, StepE, StepC>,
+        options: RetryOptions & { name?: string; key?: string; timeout?: TimeoutOptions }
+      ): Promise<StepT> => {
+        // Delegate to cachedStepFn with retry options merged into StepOptions
+        // This ensures the cache layer is consulted for keyed steps
+        return cachedStepFn(operation, {
+          name: options.name,
+          key: options.key,
+          retry: {
+            attempts: options.attempts,
+            backoff: options.backoff,
+            initialDelay: options.initialDelay,
+            maxDelay: options.maxDelay,
+            jitter: options.jitter,
+            retryOn: options.retryOn,
+            onRetry: options.onRetry,
+          },
+          timeout: options.timeout,
+        });
+      };
+
+      // Wrap step.withTimeout - use cachedStepFn to ensure caching/resume works with keyed steps
+      cachedStepFn.withTimeout = <StepT, StepE extends E, StepC = unknown>(
+        operation:
+          | (() => Result<StepT, StepE, StepC> | AsyncResult<StepT, StepE, StepC>)
+          | ((signal: AbortSignal) => Result<StepT, StepE, StepC> | AsyncResult<StepT, StepE, StepC>),
+        options: TimeoutOptions & { name?: string; key?: string }
+      ): Promise<StepT> => {
+        // Delegate to cachedStepFn with timeout options
+        // This ensures the cache layer is consulted for keyed steps
+        return cachedStepFn(
+          operation as () => Result<StepT, StepE, StepC> | AsyncResult<StepT, StepE, StepC>,
+          {
+            name: options.name,
+            key: options.key,
+            timeout: options,
+          }
+        );
+      };
 
       return cachedStepFn as RunStep<E>;
     };

@@ -255,7 +255,176 @@ export type StepOptions = {
    * Must be unique within the workflow.
    */
   key?: string;
+
+  /**
+   * Retry configuration for transient failures.
+   * When specified, the step will retry on errors according to this config.
+   */
+  retry?: RetryOptions;
+
+  /**
+   * Timeout configuration for the operation.
+   * When specified, each attempt will be aborted after the timeout duration.
+   */
+  timeout?: TimeoutOptions;
 };
+
+// =============================================================================
+// Retry and Timeout Types
+// =============================================================================
+
+/**
+ * Backoff strategy for retry operations.
+ */
+export type BackoffStrategy = "fixed" | "linear" | "exponential";
+
+/**
+ * Configuration for step retry behavior.
+ */
+export type RetryOptions = {
+  /**
+   * Total number of attempts (1 = no retry, 3 = initial + 2 retries).
+   * Must be >= 1.
+   */
+  attempts: number;
+
+  /**
+   * Backoff strategy between retries.
+   * - 'fixed': Same delay each time (initialDelay)
+   * - 'linear': Delay increases linearly (initialDelay * attempt)
+   * - 'exponential': Delay doubles each time (initialDelay * 2^(attempt-1))
+   * @default 'exponential'
+   */
+  backoff?: BackoffStrategy;
+
+  /**
+   * Initial delay in milliseconds before first retry.
+   * @default 100
+   */
+  initialDelay?: number;
+
+  /**
+   * Maximum delay cap in milliseconds.
+   * Prevents exponential backoff from growing too large.
+   * @default 30000 (30 seconds)
+   */
+  maxDelay?: number;
+
+  /**
+   * Whether to add random jitter (0-25% of delay).
+   * Helps prevent thundering herd when multiple workflows retry simultaneously.
+   * @default true
+   */
+  jitter?: boolean;
+
+  /**
+   * Predicate to determine if a retry should occur.
+   * Receives the error and current attempt number (1-indexed).
+   * Return true to retry, false to fail immediately.
+   * @default Always retry on any error
+   */
+  retryOn?: (error: unknown, attempt: number) => boolean;
+
+  /**
+   * Callback invoked before each retry attempt.
+   * Useful for logging, metrics, or side effects.
+   */
+  onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
+};
+
+/**
+ * Configuration for step timeout behavior.
+ */
+export type TimeoutOptions = {
+  /**
+   * Timeout duration in milliseconds per attempt.
+   * When combined with retry, each attempt gets its own timeout.
+   */
+  ms: number;
+
+  /**
+   * Custom error to use when timeout occurs.
+   * @default StepTimeoutError with step details
+   */
+  error?: unknown;
+
+  /**
+   * Whether to pass an AbortSignal to the operation.
+   * When true, the operation function receives (signal: AbortSignal) as argument.
+   * Useful for fetch() and other APIs that support cancellation.
+   * @default false
+   */
+  signal?: boolean;
+};
+
+/**
+ * Standard timeout error type.
+ */
+export type StepTimeoutError = {
+  type: "STEP_TIMEOUT";
+  stepName?: string;
+  stepKey?: string;
+  timeoutMs: number;
+  attempt?: number;
+};
+
+/**
+ * Symbol used to mark any error (including custom errors) as a timeout error.
+ * This allows detection of timeout errors even when users provide custom error payloads.
+ */
+export const STEP_TIMEOUT_MARKER: unique symbol = Symbol.for("step_timeout_marker");
+
+/**
+ * Metadata attached to timeout-marked errors.
+ */
+export type StepTimeoutMarkerMeta = {
+  timeoutMs: number;
+  stepName?: string;
+  stepKey?: string;
+  attempt?: number;
+};
+
+/**
+ * Type guard to check if an error is a StepTimeoutError.
+ * This checks both the standard type field AND the timeout marker symbol,
+ * so custom errors provided via timeout.error are also detected.
+ */
+export function isStepTimeoutError(e: unknown): e is StepTimeoutError {
+  if (typeof e !== "object" || e === null) {
+    return false;
+  }
+  // Check for standard type field
+  if ((e as StepTimeoutError).type === "STEP_TIMEOUT") {
+    return true;
+  }
+  // Check for timeout marker (custom errors)
+  return STEP_TIMEOUT_MARKER in e;
+}
+
+/**
+ * Get timeout metadata from a timeout error (works with both standard and custom errors).
+ * Returns undefined if the error is not a timeout error.
+ */
+export function getStepTimeoutMeta(e: unknown): StepTimeoutMarkerMeta | undefined {
+  if (typeof e !== "object" || e === null) {
+    return undefined;
+  }
+  // Check for standard type field first
+  if ((e as StepTimeoutError).type === "STEP_TIMEOUT") {
+    const err = e as StepTimeoutError;
+    return {
+      timeoutMs: err.timeoutMs,
+      stepName: err.stepName,
+      stepKey: err.stepKey,
+      attempt: err.attempt,
+    };
+  }
+  // Check for timeout marker (custom errors)
+  if (STEP_TIMEOUT_MARKER in e) {
+    return (e as Record<symbol, StepTimeoutMarkerMeta>)[STEP_TIMEOUT_MARKER];
+  }
+  return undefined;
+}
 
 // =============================================================================
 // RunStep Interface
@@ -444,6 +613,75 @@ export interface RunStep<E = unknown> {
     name: string,
     operation: () => Result<T[], StepE, StepC> | AsyncResult<T[], StepE, StepC>
   ) => Promise<T[]>;
+
+  /**
+   * Execute an operation with retry and optional timeout.
+   *
+   * Use this for operations that may fail transiently (network issues, rate limits)
+   * and benefit from automatic retry with backoff.
+   *
+   * @param operation - A function that returns a Result or AsyncResult
+   * @param options - Retry configuration and optional timeout
+   * @returns The success value (unwrapped)
+   * @throws {EarlyExit} If all retries are exhausted (stops execution safely)
+   *
+   * @example
+   * ```typescript
+   * const data = await step.retry(
+   *   () => fetchFromExternalApi(id),
+   *   {
+   *     name: 'fetch-external',
+   *     attempts: 3,
+   *     backoff: 'exponential',
+   *     initialDelay: 200,
+   *     retryOn: (error) => error === 'RATE_LIMITED' || error === 'TRANSIENT',
+   *     onRetry: (error, attempt, delay) => {
+   *       console.log(`Retry ${attempt} after ${delay}ms`);
+   *     },
+   *   }
+   * );
+   * ```
+   */
+  retry: <T, StepE extends E, StepC = unknown>(
+    operation: () => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>,
+    options: RetryOptions & { name?: string; key?: string; timeout?: TimeoutOptions }
+  ) => Promise<T>;
+
+  /**
+   * Execute an operation with a timeout.
+   *
+   * Use this for operations that may hang indefinitely (external APIs, connections)
+   * and need to be aborted after a certain duration.
+   *
+   * When `signal: true` is set, an AbortSignal is passed to your operation,
+   * which you can use with APIs like fetch() for proper cancellation.
+   *
+   * @param operation - A function that returns a Result (may receive AbortSignal)
+   * @param options - Timeout configuration
+   * @returns The success value (unwrapped)
+   * @throws {EarlyExit} If the operation times out (stops execution safely)
+   *
+   * @example
+   * ```typescript
+   * // Without AbortSignal
+   * const data = await step.withTimeout(
+   *   () => fetchData(id),
+   *   { ms: 5000, name: 'fetch-data' }
+   * );
+   *
+   * // With AbortSignal for fetch()
+   * const data = await step.withTimeout(
+   *   (signal) => fetch(url, { signal }).then(r => ok(r.json())),
+   *   { ms: 5000, signal: true, name: 'fetch-url' }
+   * );
+   * ```
+   */
+  withTimeout: <T, StepE extends E, StepC = unknown>(
+    operation:
+      | (() => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>)
+      | ((signal: AbortSignal) => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>),
+    options: TimeoutOptions & { name?: string; key?: string }
+  ) => Promise<T>;
 }
 
 // =============================================================================
@@ -476,7 +714,42 @@ export type WorkflowEvent<E> =
   | { type: "step_cache_miss"; workflowId: string; stepKey: string; name?: string; ts: number }
   | { type: "step_skipped"; workflowId: string; stepKey?: string; name?: string; reason?: string; decisionId?: string; ts: number }
   | { type: "scope_start"; workflowId: string; scopeId: string; scopeType: ScopeType; name?: string; ts: number }
-  | { type: "scope_end"; workflowId: string; scopeId: string; ts: number; durationMs: number; winnerId?: string };
+  | { type: "scope_end"; workflowId: string; scopeId: string; ts: number; durationMs: number; winnerId?: string }
+  // Retry events
+  | {
+      type: "step_retry";
+      workflowId: string;
+      stepId: string;
+      stepKey?: string;
+      name?: string;
+      ts: number;
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      error: E;
+    }
+  | {
+      type: "step_retries_exhausted";
+      workflowId: string;
+      stepId: string;
+      stepKey?: string;
+      name?: string;
+      ts: number;
+      durationMs: number;
+      attempts: number;
+      lastError: E;
+    }
+  // Timeout event
+  | {
+      type: "step_timeout";
+      workflowId: string;
+      stepId: string;
+      stepKey?: string;
+      name?: string;
+      ts: number;
+      timeoutMs: number;
+      attempt?: number;
+    };
 
 // =============================================================================
 // Run Options
@@ -605,12 +878,181 @@ function isMapperException(e: unknown): e is MapperException {
 }
 
 /** Helper to parse step options - accepts string or object form */
-function parseStepOptions(options?: StepOptions | string): { name?: string; key?: string } {
+function parseStepOptions(
+  options?: StepOptions | string
+): StepOptions & { name?: string; key?: string } {
   if (typeof options === "string") {
     return { name: options };
   }
   return options ?? {};
 }
+
+// =============================================================================
+// Retry and Timeout Utilities
+// =============================================================================
+
+/**
+ * Calculate the delay for a retry attempt based on the backoff strategy.
+ * @internal
+ */
+function calculateRetryDelay(
+  attempt: number,
+  options: {
+    backoff: BackoffStrategy;
+    initialDelay: number;
+    maxDelay: number;
+    jitter: boolean;
+  }
+): number {
+  const { backoff, initialDelay, maxDelay, jitter } = options;
+
+  let delay: number;
+
+  switch (backoff) {
+    case "fixed":
+      delay = initialDelay;
+      break;
+    case "linear":
+      delay = initialDelay * attempt;
+      break;
+    case "exponential":
+      delay = initialDelay * Math.pow(2, attempt - 1);
+      break;
+  }
+
+  // Apply max cap
+  delay = Math.min(delay, maxDelay);
+
+  // Apply jitter (0-25% of delay)
+  if (jitter) {
+    const jitterAmount = delay * 0.25 * Math.random();
+    delay = delay + jitterAmount;
+  }
+
+  return Math.floor(delay);
+}
+
+/**
+ * Sleep for a specified number of milliseconds.
+ * @internal
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Symbol used internally to identify timeout rejection.
+ */
+const TIMEOUT_SYMBOL: unique symbol = Symbol("timeout");
+
+/**
+ * Execute an operation with a timeout using Promise.race.
+ * @internal
+ */
+async function executeWithTimeout<T>(
+  operation: (() => Promise<T>) | ((signal: AbortSignal) => Promise<T>),
+  options: TimeoutOptions,
+  stepInfo: { name?: string; key?: string; attempt?: number }
+): Promise<T> {
+  const controller = new AbortController();
+
+  // Create the timeout error once
+  const timeoutError: StepTimeoutError =
+    (options.error as StepTimeoutError) ?? {
+      type: "STEP_TIMEOUT",
+      stepName: stepInfo.name,
+      stepKey: stepInfo.key,
+      timeoutMs: options.ms,
+      attempt: stepInfo.attempt,
+    };
+
+  // Track the timeout ID for cleanup
+  let timeoutId: ReturnType<typeof setTimeout>;
+
+  // Create a timeout promise that rejects after the specified duration
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort(); // Signal abort for operations that support it
+      reject({ [TIMEOUT_SYMBOL]: true, error: timeoutError });
+    }, options.ms);
+  });
+
+  // Execute the operation
+  let operationPromise: Promise<T>;
+  if (options.signal) {
+    // Operation expects an AbortSignal
+    operationPromise = Promise.resolve(
+      (operation as (signal: AbortSignal) => Promise<T>)(controller.signal)
+    );
+  } else {
+    // Standard operation
+    operationPromise = Promise.resolve((operation as () => Promise<T>)());
+  }
+
+  try {
+    // Race between operation and timeout
+    const result = await Promise.race([operationPromise, timeoutPromise]);
+    return result;
+  } catch (error) {
+    // Check if this was our timeout
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      (error as Record<symbol, unknown>)[TIMEOUT_SYMBOL] === true
+    ) {
+      const errorToThrow = (error as { error: unknown }).error;
+
+      // Mark the error with STEP_TIMEOUT_MARKER if it's a custom error (not already a StepTimeoutError)
+      // This allows isStepTimeoutError() and getStepTimeoutMeta() to work with custom errors
+      // Note: Always update metadata to reflect the current attempt (same error may be reused across retries)
+      if (
+        typeof errorToThrow === "object" &&
+        errorToThrow !== null &&
+        (errorToThrow as StepTimeoutError).type !== "STEP_TIMEOUT"
+      ) {
+        const meta: StepTimeoutMarkerMeta = {
+          timeoutMs: options.ms,
+          stepName: stepInfo.name,
+          stepKey: stepInfo.key,
+          attempt: stepInfo.attempt,
+        };
+
+        if (STEP_TIMEOUT_MARKER in errorToThrow) {
+          // Update existing marker with current attempt's metadata
+          (errorToThrow as Record<symbol, StepTimeoutMarkerMeta>)[STEP_TIMEOUT_MARKER] = meta;
+        } else {
+          // Define new marker (writable so it can be updated on retry)
+          Object.defineProperty(errorToThrow, STEP_TIMEOUT_MARKER, {
+            value: meta,
+            enumerable: false,
+            writable: true,
+            configurable: false,
+          });
+        }
+      }
+
+      throw errorToThrow;
+    }
+    // Re-throw other errors
+    throw error;
+  } finally {
+    // Always clear the timeout to prevent leaks
+    clearTimeout(timeoutId!);
+  }
+}
+
+/**
+ * Default retry configuration values.
+ * @internal
+ */
+const DEFAULT_RETRY_CONFIG = {
+  backoff: "exponential" as BackoffStrategy,
+  initialDelay: 100,
+  maxDelay: 30000,
+  jitter: true,
+  retryOn: () => true,
+  onRetry: () => {},
+} as const;
 
 // =============================================================================
 // run() Function
@@ -861,11 +1303,46 @@ export async function run<T, E, C = void>(
       stepOptions?: StepOptions | string
     ): Promise<T> => {
       return (async () => {
-        const { name: stepName, key: stepKey } = parseStepOptions(stepOptions);
+        const parsedOptions = parseStepOptions(stepOptions);
+        const { name: stepName, key: stepKey, retry: retryConfig, timeout: timeoutConfig } = parsedOptions;
         const stepId = generateStepId(stepKey);
         const hasEventListeners = onEvent;
-        const startTime = hasEventListeners ? performance.now() : 0;
+        const overallStartTime = hasEventListeners ? performance.now() : 0;
 
+        // Validate that retry/timeout are only used with function operations
+        // Direct Promise/Result values cannot be re-executed or wrapped with timeout
+        const isFunction = typeof operationOrResult === "function";
+        if (!isFunction) {
+          if (retryConfig && retryConfig.attempts > 1) {
+            throw new Error(
+              `step: retry options require a function operation. ` +
+              `Direct Promise/Result values cannot be re-executed on retry. ` +
+              `Wrap your operation in a function: step(() => yourOperation, { retry: {...} })`
+            );
+          }
+          if (timeoutConfig) {
+            throw new Error(
+              `step: timeout options require a function operation. ` +
+              `Direct Promise/Result values cannot be wrapped with timeout after they've started. ` +
+              `Wrap your operation in a function: step(() => yourOperation, { timeout: {...} })`
+            );
+          }
+        }
+
+        // Build effective retry config with defaults
+        // Ensure at least 1 attempt (0 would skip the loop entirely and crash)
+        const maxAttempts = Math.max(1, retryConfig?.attempts ?? 1);
+        const effectiveRetry = {
+          attempts: maxAttempts,
+          backoff: retryConfig?.backoff ?? DEFAULT_RETRY_CONFIG.backoff,
+          initialDelay: retryConfig?.initialDelay ?? DEFAULT_RETRY_CONFIG.initialDelay,
+          maxDelay: retryConfig?.maxDelay ?? DEFAULT_RETRY_CONFIG.maxDelay,
+          jitter: retryConfig?.jitter ?? DEFAULT_RETRY_CONFIG.jitter,
+          retryOn: retryConfig?.retryOn ?? DEFAULT_RETRY_CONFIG.retryOn,
+          onRetry: retryConfig?.onRetry ?? DEFAULT_RETRY_CONFIG.onRetry,
+        };
+
+        // Emit step_start only once (before first attempt)
         if (onEvent) {
           emitEvent({
             type: "step_start",
@@ -877,127 +1354,285 @@ export async function run<T, E, C = void>(
           });
         }
 
-        let result: Result<T, StepE, StepC>;
-        try {
-          result = await (typeof operationOrResult === "function"
-            ? operationOrResult()
-            : operationOrResult);
-        } catch (thrown) {
-          const durationMs = performance.now() - startTime;
-          if (isEarlyExitE(thrown)) {
-            emitEvent({
-              type: "step_aborted",
-              workflowId,
-              stepId,
-              stepKey,
-              name: stepName,
-              ts: Date.now(),
-              durationMs,
-            });
-            throw thrown;
-          }
+        let lastResult: Result<T, StepE, StepC> | undefined;
 
-          if (catchUnexpected) {
-            // Strict mode: call catchUnexpected once, protect against mapper exceptions
-            let mappedError: E;
-            try {
-              mappedError = catchUnexpected(thrown) as unknown as E;
-            } catch (mapperError) {
-              // Mapper threw - wrap and propagate so run()'s outer catch doesn't re-process
-              throw createMapperException(mapperError);
+        for (let attempt = 1; attempt <= effectiveRetry.attempts; attempt++) {
+          const attemptStartTime = hasEventListeners ? performance.now() : 0;
+
+          try {
+            // Execute operation with optional timeout
+            let result: Result<T, StepE, StepC>;
+
+            if (typeof operationOrResult === "function") {
+              if (timeoutConfig) {
+                // Wrap with timeout
+                result = await executeWithTimeout(
+                  operationOrResult as () => Promise<Result<T, StepE, StepC>>,
+                  timeoutConfig,
+                  { name: stepName, key: stepKey, attempt }
+                );
+              } else {
+                result = await operationOrResult();
+              }
+            } else {
+              // Direct value - timeout doesn't apply
+              result = await operationOrResult;
             }
-            emitEvent({
-              type: "step_error",
-              workflowId,
-              stepId,
-              stepKey,
-              name: stepName,
-              ts: Date.now(),
-              durationMs,
-              error: mappedError,
-            });
-            // Emit step_complete for keyed steps (for state persistence)
-            if (stepKey) {
+
+            // Success case
+            if (result.ok) {
+              const durationMs = performance.now() - overallStartTime;
               emitEvent({
-                type: "step_complete",
+                type: "step_success",
                 workflowId,
+                stepId,
                 stepKey,
                 name: stepName,
                 ts: Date.now(),
                 durationMs,
-                result: err(mappedError, { cause: thrown }),
-                meta: { origin: "throw", thrown },
+              });
+              if (stepKey) {
+                emitEvent({
+                  type: "step_complete",
+                  workflowId,
+                  stepKey,
+                  name: stepName,
+                  ts: Date.now(),
+                  durationMs,
+                  result,
+                });
+              }
+              return result.value;
+            }
+
+            // Result error case - check if we should retry
+            lastResult = result;
+
+            if (attempt < effectiveRetry.attempts && effectiveRetry.retryOn(result.error, attempt)) {
+              const delay = calculateRetryDelay(attempt, effectiveRetry);
+
+              // Emit retry event
+              emitEvent({
+                type: "step_retry",
+                workflowId,
+                stepId,
+                stepKey,
+                name: stepName,
+                ts: Date.now(),
+                attempt: attempt + 1,
+                maxAttempts: effectiveRetry.attempts,
+                delayMs: delay,
+                error: result.error as unknown as E,
+              });
+
+              effectiveRetry.onRetry(result.error, attempt, delay);
+              await sleep(delay);
+              continue;
+            }
+
+            // No more retries or retryOn returned false - emit exhausted event if we retried
+            if (effectiveRetry.attempts > 1) {
+              emitEvent({
+                type: "step_retries_exhausted",
+                workflowId,
+                stepId,
+                stepKey,
+                name: stepName,
+                ts: Date.now(),
+                durationMs: performance.now() - overallStartTime,
+                attempts: attempt,
+                lastError: result.error as unknown as E,
               });
             }
-            onError?.(mappedError as E, stepName);
-            throw earlyExit(mappedError as E, { origin: "throw", thrown });
-          } else {
-            // Safe-default mode: emit event and re-throw original exception
-            // run()'s outer catch will create UnexpectedError with UNCAUGHT_EXCEPTION
-            const unexpectedError: UnexpectedError = {
-              type: "UNEXPECTED_ERROR",
-              cause: { type: "UNCAUGHT_EXCEPTION", thrown },
-            };
-            emitEvent({
-              type: "step_error",
-              workflowId,
-              stepId,
-              stepKey,
-              name: stepName,
-              ts: Date.now(),
-              durationMs,
-              error: unexpectedError,
-            });
-            // Emit step_complete for keyed steps (for state persistence)
-            // In safe-default mode, the error is already an UnexpectedError
-            // We use origin:"throw" so resume knows this came from an uncaught exception
-            if (stepKey) {
+
+            // Fall through to final error handling below
+            break;
+
+          } catch (thrown) {
+            const durationMs = performance.now() - attemptStartTime;
+
+            // Handle early exit - propagate immediately
+            if (isEarlyExitE(thrown)) {
               emitEvent({
-                type: "step_complete",
+                type: "step_aborted",
                 workflowId,
+                stepId,
                 stepKey,
                 name: stepName,
                 ts: Date.now(),
                 durationMs,
-                result: err(unexpectedError, { cause: thrown }),
-                meta: { origin: "throw", thrown },
+              });
+              throw thrown;
+            }
+
+            // Handle timeout error
+            if (isStepTimeoutError(thrown)) {
+              // Get timeout metadata from the error (works for both standard and custom errors)
+              const timeoutMeta = getStepTimeoutMeta(thrown);
+              const timeoutMs = timeoutConfig?.ms ?? timeoutMeta?.timeoutMs ?? 0;
+              emitEvent({
+                type: "step_timeout",
+                workflowId,
+                stepId,
+                stepKey,
+                name: stepName,
+                ts: Date.now(),
+                timeoutMs,
+                attempt,
+              });
+
+              // Check if we should retry after timeout
+              if (attempt < effectiveRetry.attempts && effectiveRetry.retryOn(thrown, attempt)) {
+                const delay = calculateRetryDelay(attempt, effectiveRetry);
+
+                emitEvent({
+                  type: "step_retry",
+                  workflowId,
+                  stepId,
+                  stepKey,
+                  name: stepName,
+                  ts: Date.now(),
+                  attempt: attempt + 1,
+                  maxAttempts: effectiveRetry.attempts,
+                  delayMs: delay,
+                  error: thrown as unknown as E,
+                });
+
+                effectiveRetry.onRetry(thrown, attempt, delay);
+                await sleep(delay);
+                continue;
+              }
+
+              // No more retries - emit exhausted if we retried
+              if (effectiveRetry.attempts > 1) {
+                emitEvent({
+                  type: "step_retries_exhausted",
+                  workflowId,
+                  stepId,
+                  stepKey,
+                  name: stepName,
+                  ts: Date.now(),
+                  durationMs: performance.now() - overallStartTime,
+                  attempts: attempt,
+                  lastError: thrown as unknown as E,
+                });
+              }
+
+              // Treat timeout as a thrown error for error handling
+            }
+
+            // Handle other thrown errors (continue to error handling below)
+
+            // Check if we should retry thrown errors
+            if (attempt < effectiveRetry.attempts && effectiveRetry.retryOn(thrown, attempt)) {
+              const delay = calculateRetryDelay(attempt, effectiveRetry);
+
+              emitEvent({
+                type: "step_retry",
+                workflowId,
+                stepId,
+                stepKey,
+                name: stepName,
+                ts: Date.now(),
+                attempt: attempt + 1,
+                maxAttempts: effectiveRetry.attempts,
+                delayMs: delay,
+                error: thrown as unknown as E,
+              });
+
+              effectiveRetry.onRetry(thrown, attempt, delay);
+              await sleep(delay);
+              continue;
+            }
+
+            // No more retries for thrown errors - emit exhausted if we retried
+            if (effectiveRetry.attempts > 1 && !isStepTimeoutError(thrown)) {
+              emitEvent({
+                type: "step_retries_exhausted",
+                workflowId,
+                stepId,
+                stepKey,
+                name: stepName,
+                ts: Date.now(),
+                durationMs: performance.now() - overallStartTime,
+                attempts: attempt,
+                lastError: thrown as unknown as E,
               });
             }
-            throw thrown;
+
+            // Handle the error based on mode
+            const totalDurationMs = performance.now() - overallStartTime;
+
+            if (catchUnexpected) {
+              let mappedError: E;
+              try {
+                mappedError = catchUnexpected(thrown) as unknown as E;
+              } catch (mapperError) {
+                throw createMapperException(mapperError);
+              }
+              emitEvent({
+                type: "step_error",
+                workflowId,
+                stepId,
+                stepKey,
+                name: stepName,
+                ts: Date.now(),
+                durationMs: totalDurationMs,
+                error: mappedError,
+              });
+              if (stepKey) {
+                emitEvent({
+                  type: "step_complete",
+                  workflowId,
+                  stepKey,
+                  name: stepName,
+                  ts: Date.now(),
+                  durationMs: totalDurationMs,
+                  result: err(mappedError, { cause: thrown }),
+                  meta: { origin: "throw", thrown },
+                });
+              }
+              onError?.(mappedError as E, stepName);
+              throw earlyExit(mappedError as E, { origin: "throw", thrown });
+            } else {
+              const unexpectedError: UnexpectedError = {
+                type: "UNEXPECTED_ERROR",
+                cause: { type: "UNCAUGHT_EXCEPTION", thrown },
+              };
+              emitEvent({
+                type: "step_error",
+                workflowId,
+                stepId,
+                stepKey,
+                name: stepName,
+                ts: Date.now(),
+                durationMs: totalDurationMs,
+                error: unexpectedError,
+              });
+              if (stepKey) {
+                emitEvent({
+                  type: "step_complete",
+                  workflowId,
+                  stepKey,
+                  name: stepName,
+                  ts: Date.now(),
+                  durationMs: totalDurationMs,
+                  result: err(unexpectedError, { cause: thrown }),
+                  meta: { origin: "throw", thrown },
+                });
+              }
+              throw thrown;
+            }
           }
         }
 
-        const durationMs = performance.now() - startTime;
-
-        if (result.ok) {
-          emitEvent({
-            type: "step_success",
-            workflowId,
-            stepId,
-            stepKey,
-            name: stepName,
-            ts: Date.now(),
-            durationMs,
-          });
-          // Emit step_complete for keyed steps (for state persistence)
-          // Pass original result to preserve cause type (Result<T, StepE, StepC>)
-          if (stepKey) {
-            emitEvent({
-              type: "step_complete",
-              workflowId,
-              stepKey,
-              name: stepName,
-              ts: Date.now(),
-              durationMs,
-              result,
-            });
-          }
-          return result.value;
-        }
-
-        const wrappedError = wrapForStep(result.error, {
+        // All retries exhausted with Result error - handle final error
+        // At this point lastResult must be an error result (we only reach here on error)
+        const errorResult = lastResult as { ok: false; error: StepE; cause?: StepC };
+        const totalDurationMs = performance.now() - overallStartTime;
+        const wrappedError = wrapForStep(errorResult.error, {
           origin: "result",
-          resultCause: result.cause,
+          resultCause: errorResult.cause,
         });
         emitEvent({
           type: "step_error",
@@ -1006,11 +1641,9 @@ export async function run<T, E, C = void>(
           stepKey,
           name: stepName,
           ts: Date.now(),
-          durationMs,
+          durationMs: totalDurationMs,
           error: wrappedError,
         });
-        // Emit step_complete for keyed steps (for state persistence)
-        // Pass original result to preserve cause type (Result<T, StepE, StepC>)
         if (stepKey) {
           emitEvent({
             type: "step_complete",
@@ -1018,15 +1651,15 @@ export async function run<T, E, C = void>(
             stepKey,
             name: stepName,
             ts: Date.now(),
-            durationMs,
-            result,
-            meta: { origin: "result", resultCause: result.cause },
+            durationMs: totalDurationMs,
+            result: errorResult,
+            meta: { origin: "result", resultCause: errorResult.cause },
           });
         }
-        onError?.(result.error as unknown as E, stepName);
-        throw earlyExit(result.error as unknown as E, {
+        onError?.(errorResult.error as unknown as E, stepName);
+        throw earlyExit(errorResult.error as unknown as E, {
           origin: "result",
-          resultCause: result.cause,
+          resultCause: errorResult.cause,
         });
       })();
     };
@@ -1208,6 +1841,47 @@ export async function run<T, E, C = void>(
           });
         }
       })();
+    };
+
+    // step.retry: Execute an operation with retry and optional timeout
+    stepFn.retry = <T, StepE, StepC = unknown>(
+      operation: () => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>,
+      options: RetryOptions & { name?: string; key?: string; timeout?: TimeoutOptions }
+    ): Promise<T> => {
+      // Delegate to stepFn with retry options merged into StepOptions
+      return stepFn(operation, {
+        name: options.name,
+        key: options.key,
+        retry: {
+          attempts: options.attempts,
+          backoff: options.backoff,
+          initialDelay: options.initialDelay,
+          maxDelay: options.maxDelay,
+          jitter: options.jitter,
+          retryOn: options.retryOn,
+          onRetry: options.onRetry,
+        },
+        timeout: options.timeout,
+      });
+    };
+
+    // step.withTimeout: Execute an operation with a timeout
+    stepFn.withTimeout = <T, StepE, StepC = unknown>(
+      operation:
+        | (() => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>)
+        | ((signal: AbortSignal) => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>),
+      options: TimeoutOptions & { name?: string; key?: string }
+    ): Promise<T> => {
+      // Delegate to stepFn with timeout options
+      // The signal handling happens in executeWithTimeout when timeout.signal is true
+      return stepFn(
+        operation as () => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>,
+        {
+          name: options.name,
+          key: options.key,
+          timeout: options,
+        }
+      );
     };
 
     // step.parallel: Execute a parallel operation with scope events

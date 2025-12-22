@@ -280,9 +280,13 @@ if (result.ok) {
 | `step(op())` | Unwrap Result or exit early |
 | `step.try(fn, { error })` | Catch throws/rejects → typed error |
 | `step.fromResult(fn, { onError })` | Map Result errors with typed onError |
+| `step.retry(fn, opts)` | Retry with backoff on failure |
+| `step.withTimeout(fn, { ms })` | Timeout after specified duration |
 | `ok(value)` / `err(error)` | Create Results |
 | `map`, `andThen`, `match` | Transform Results |
 | `allAsync`, `partition` | Batch operations |
+| `isStepTimeoutError(e)` | Check if error is a timeout |
+| `getStepTimeoutMeta(e)` | Get timeout metadata from error |
 
 ### Choosing Between run() and createWorkflow()
 
@@ -347,6 +351,84 @@ const result = await workflow(async (step) => {
 });
 ```
 
+### Retry with backoff
+
+Automatically retry failed steps with configurable backoff:
+
+```typescript
+const result = await workflow(async (step) => {
+  // Retry up to 3 times with exponential backoff
+  const data = await step.retry(
+    () => fetchData(),
+    {
+      attempts: 3,
+      backoff: 'exponential',  // 'fixed' | 'linear' | 'exponential'
+      initialDelay: 100,       // ms
+      maxDelay: 5000,          // cap delay at 5s
+      jitter: true,            // add randomness to prevent thundering herd
+      retryOn: (error) => error !== 'FATAL',  // custom retry predicate
+    }
+  );
+  return data;
+});
+```
+
+Or use retry options directly on `step()`:
+
+```typescript
+const user = await step(() => fetchUser(id), {
+  key: 'user:1',
+  retry: { attempts: 3, backoff: 'exponential' },
+});
+```
+
+### Timeout
+
+Prevent steps from hanging with timeouts:
+
+```typescript
+const result = await workflow(async (step) => {
+  // Timeout after 5 seconds
+  const data = await step.withTimeout(
+    () => slowOperation(),
+    { ms: 5000, name: 'slow-op' }
+  );
+  return data;
+});
+```
+
+With AbortSignal for cancellable operations:
+
+```typescript
+const data = await step.withTimeout(
+  (signal) => fetch('/api/data', { signal }),
+  { ms: 5000, signal: true }  // pass signal to operation
+);
+```
+
+Combine retry and timeout - each attempt gets its own timeout:
+
+```typescript
+const data = await step.retry(
+  () => fetchData(),
+  {
+    attempts: 3,
+    timeout: { ms: 2000 },  // 2s timeout per attempt
+  }
+);
+```
+
+Detecting timeout errors:
+
+```typescript
+import { isStepTimeoutError, getStepTimeoutMeta } from '@jagreehal/workflow';
+
+if (!result.ok && isStepTimeoutError(result.error)) {
+  const meta = getStepTimeoutMeta(result.error);
+  console.log(`Timed out after ${meta?.timeoutMs}ms on attempt ${meta?.attempt}`);
+}
+```
+
 ### State save & resume
 
 Save step results for workflow replay:
@@ -399,9 +481,46 @@ const workflow = createWorkflow({ fetchUser }, {
   onEvent: (event) => {
     // workflow_start | workflow_success | workflow_error
     // step_start | step_success | step_error | step_complete
+    // step_retry | step_timeout | step_retries_exhausted
     console.log(event.type, event.durationMs);
   }
 });
+```
+
+### Visualization
+
+Render workflow execution as ASCII art or Mermaid diagrams:
+
+```typescript
+import { createIRBuilder, renderToAscii, renderToMermaid } from '@jagreehal/workflow/visualize';
+
+const builder = createIRBuilder();
+const workflow = createWorkflow({ fetchUser, fetchPosts }, {
+  onEvent: (event) => builder.addEvent(event),
+});
+
+await workflow(async (step) => {
+  const user = await step(() => fetchUser('1'), { name: 'Fetch user' });
+  const posts = await step(() => fetchPosts(user.id), { name: 'Fetch posts' });
+  return { user, posts };
+});
+
+// ASCII output
+console.log(renderToAscii(builder.getIR()));
+// ┌── my-workflow ──────────────────────────┐
+// │  ✓ Fetch user [150ms]                   │
+// │  ✓ Fetch posts [89ms]                   │
+// │  Completed in 240ms                     │
+// └─────────────────────────────────────────┘
+
+// Mermaid output (for docs, GitHub, etc.)
+console.log(renderToMermaid(builder.getIR()));
+```
+
+Visualization includes retry and timeout indicators:
+
+```
+✓ Fetch data [500ms] [2 retries] [timeout 5000ms]
 ```
 
 ### Human-in-the-loop

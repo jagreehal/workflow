@@ -60,6 +60,12 @@ import {
   hasPendingApproval,
   getPendingApprovals,
   createHITLCollector,
+  // Retry and timeout exports
+  RetryOptions,
+  TimeoutOptions,
+  BackoffStrategy,
+  StepTimeoutError,
+  isStepTimeoutError,
 } from "./index";
 
 describe("Result Core", () => {
@@ -4570,5 +4576,509 @@ describe("HITL - Human-in-the-Loop Support", () => {
         expect(result.error.reason).toBe("Insufficient budget");
       }
     });
+  });
+});
+
+// =============================================================================
+// Retry and Timeout Tests
+// =============================================================================
+
+describe("Step Retry with Backoff", () => {
+  describe("basic retry behavior", () => {
+    it("succeeds on first attempt without retry", async () => {
+      let attempts = 0;
+
+      const result = await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            return ok("success");
+          },
+          { retry: { attempts: 3 } }
+        );
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value).toBe("success");
+      }
+      expect(attempts).toBe(1);
+    });
+
+    it("retries on transient errors and succeeds", async () => {
+      let attempts = 0;
+
+      const result = await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            if (attempts < 3) return err("TRANSIENT" as const);
+            return ok("success");
+          },
+          {
+            retry: {
+              attempts: 5,
+              backoff: "fixed",
+              initialDelay: 10,
+              jitter: false,
+            },
+          }
+        );
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value).toBe("success");
+      }
+      expect(attempts).toBe(3);
+    });
+
+    it("fails after exhausting all retries", async () => {
+      let attempts = 0;
+
+      const result = await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            return err("ALWAYS_FAILS" as const);
+          },
+          {
+            retry: {
+              attempts: 3,
+              backoff: "fixed",
+              initialDelay: 10,
+              jitter: false,
+            },
+          }
+        );
+      });
+
+      expect(result.ok).toBe(false);
+      expect(attempts).toBe(3);
+    });
+
+    it("respects retryOn predicate", async () => {
+      let attempts = 0;
+
+      const result = await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            if (attempts === 1) return err("RETRYABLE" as const);
+            return err("NOT_RETRYABLE" as const);
+          },
+          {
+            retry: {
+              attempts: 5,
+              backoff: "fixed",
+              initialDelay: 10,
+              jitter: false,
+              retryOn: (error) => error === "RETRYABLE",
+            },
+          }
+        );
+      });
+
+      expect(result.ok).toBe(false);
+      expect(attempts).toBe(2); // Stopped after NOT_RETRYABLE
+    });
+
+    it("calls onRetry callback before each retry", async () => {
+      let attempts = 0;
+      const retryCallbacks: { error: unknown; attempt: number; delay: number }[] = [];
+
+      const result = await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            if (attempts < 3) return err("TRANSIENT" as const);
+            return ok("success");
+          },
+          {
+            retry: {
+              attempts: 5,
+              backoff: "fixed",
+              initialDelay: 10,
+              jitter: false,
+              onRetry: (error, attempt, delay) => {
+                retryCallbacks.push({ error, attempt, delay });
+              },
+            },
+          }
+        );
+      });
+
+      expect(result.ok).toBe(true);
+      expect(retryCallbacks).toHaveLength(2);
+      expect(retryCallbacks[0]).toEqual({ error: "TRANSIENT", attempt: 1, delay: 10 });
+      expect(retryCallbacks[1]).toEqual({ error: "TRANSIENT", attempt: 2, delay: 10 });
+    });
+  });
+
+  describe("backoff strategies", () => {
+    it("uses fixed backoff correctly", async () => {
+      const delays: number[] = [];
+      let attempts = 0;
+
+      await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            if (attempts < 4) return err("FAIL" as const);
+            return ok("success");
+          },
+          {
+            retry: {
+              attempts: 5,
+              backoff: "fixed",
+              initialDelay: 100,
+              jitter: false,
+              onRetry: (_error, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          }
+        );
+      });
+
+      expect(delays).toEqual([100, 100, 100]); // All same delay
+    });
+
+    it("uses linear backoff correctly", async () => {
+      const delays: number[] = [];
+      let attempts = 0;
+
+      await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            if (attempts < 4) return err("FAIL" as const);
+            return ok("success");
+          },
+          {
+            retry: {
+              attempts: 5,
+              backoff: "linear",
+              initialDelay: 100,
+              jitter: false,
+              onRetry: (_error, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          }
+        );
+      });
+
+      // Linear: delay * attempt
+      expect(delays).toEqual([100, 200, 300]);
+    });
+
+    it("uses exponential backoff correctly", async () => {
+      const delays: number[] = [];
+      let attempts = 0;
+
+      await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            if (attempts < 4) return err("FAIL" as const);
+            return ok("success");
+          },
+          {
+            retry: {
+              attempts: 5,
+              backoff: "exponential",
+              initialDelay: 100,
+              jitter: false,
+              onRetry: (_error, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          }
+        );
+      });
+
+      // Exponential: delay * 2^(attempt-1)
+      expect(delays).toEqual([100, 200, 400]);
+    });
+
+    it("respects maxDelay cap", async () => {
+      const delays: number[] = [];
+      let attempts = 0;
+
+      await run(async (step) => {
+        return await step(
+          () => {
+            attempts++;
+            if (attempts < 6) return err("FAIL" as const);
+            return ok("success");
+          },
+          {
+            retry: {
+              attempts: 10,
+              backoff: "exponential",
+              initialDelay: 100,
+              maxDelay: 500,
+              jitter: false,
+              onRetry: (_error, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          }
+        );
+      });
+
+      // Should cap at 500: 100, 200, 400, 500, 500
+      expect(delays).toEqual([100, 200, 400, 500, 500]);
+    });
+  });
+
+  describe("retry events", () => {
+    it("emits step_retry events for each retry", async () => {
+      const events: WorkflowEvent<unknown>[] = [];
+      let attempts = 0;
+
+      await run(
+        async (step) => {
+          return await step(
+            () => {
+              attempts++;
+              if (attempts < 3) return err("TRANSIENT" as const);
+              return ok("success");
+            },
+            {
+              name: "test-step",
+              retry: {
+                attempts: 5,
+                backoff: "fixed",
+                initialDelay: 10,
+                jitter: false,
+              },
+            }
+          );
+        },
+        {
+          onEvent: (e) => events.push(e),
+        }
+      );
+
+      const retryEvents = events.filter((e) => e.type === "step_retry");
+      expect(retryEvents).toHaveLength(2);
+
+      const firstRetry = retryEvents[0] as Extract<WorkflowEvent<unknown>, { type: "step_retry" }>;
+      expect(firstRetry.attempt).toBe(2); // About to attempt #2
+      expect(firstRetry.maxAttempts).toBe(5);
+      expect(firstRetry.name).toBe("test-step");
+    });
+
+    it("emits step_retries_exhausted when all retries fail", async () => {
+      const events: WorkflowEvent<unknown>[] = [];
+
+      await run(
+        async (step) => {
+          return await step(
+            () => err("ALWAYS_FAILS" as const),
+            {
+              name: "failing-step",
+              retry: {
+                attempts: 3,
+                backoff: "fixed",
+                initialDelay: 10,
+                jitter: false,
+              },
+            }
+          );
+        },
+        {
+          onEvent: (e) => events.push(e),
+        }
+      );
+
+      const exhaustedEvents = events.filter((e) => e.type === "step_retries_exhausted");
+      expect(exhaustedEvents).toHaveLength(1);
+
+      const exhausted = exhaustedEvents[0] as Extract<WorkflowEvent<unknown>, { type: "step_retries_exhausted" }>;
+      expect(exhausted.attempts).toBe(3);
+      expect(exhausted.lastError).toBe("ALWAYS_FAILS");
+      expect(exhausted.name).toBe("failing-step");
+    });
+  });
+
+  describe("step.retry() method", () => {
+    it("works as shorthand for retry options", async () => {
+      let attempts = 0;
+
+      const result = await run(async (step) => {
+        return await step.retry(
+          () => {
+            attempts++;
+            if (attempts < 3) return err("TRANSIENT" as const);
+            return ok("success");
+          },
+          {
+            name: "retry-step",
+            attempts: 5,
+            backoff: "exponential",
+            initialDelay: 10,
+            jitter: false,
+          }
+        );
+      });
+
+      expect(result.ok).toBe(true);
+      expect(attempts).toBe(3);
+    });
+  });
+});
+
+describe("Step Timeout", () => {
+  describe("basic timeout behavior", () => {
+    it("succeeds when operation completes before timeout", async () => {
+      const result = await run(async (step) => {
+        return await step(
+          async () => {
+            await new Promise((r) => setTimeout(r, 10));
+            return ok("fast");
+          },
+          { timeout: { ms: 1000 } }
+        );
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value).toBe("fast");
+      }
+    });
+
+    it("fails when operation exceeds timeout", async () => {
+      const result = await run(
+        async (step) => {
+          return await step(
+            async () => {
+              await new Promise((r) => setTimeout(r, 1000));
+              return ok("slow");
+            },
+            { timeout: { ms: 50 } }
+          );
+        },
+        {
+          catchUnexpected: (cause) => ({ type: "UNEXPECTED" as const, cause }),
+        }
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok && isStepTimeoutError(result.error)) {
+        expect(result.error.type).toBe("STEP_TIMEOUT");
+        expect(result.error.timeoutMs).toBe(50);
+      }
+    });
+
+    it("emits step_timeout event on timeout", async () => {
+      const events: WorkflowEvent<unknown>[] = [];
+
+      await run(
+        async (step) => {
+          return await step(
+            async () => {
+              await new Promise((r) => setTimeout(r, 1000));
+              return ok("slow");
+            },
+            { name: "slow-step", timeout: { ms: 50 } }
+          );
+        },
+        {
+          onEvent: (e) => events.push(e),
+          catchUnexpected: (cause) => ({ type: "UNEXPECTED" as const, cause }),
+        }
+      );
+
+      const timeoutEvents = events.filter((e) => e.type === "step_timeout");
+      expect(timeoutEvents).toHaveLength(1);
+
+      const timeout = timeoutEvents[0] as Extract<WorkflowEvent<unknown>, { type: "step_timeout" }>;
+      expect(timeout.timeoutMs).toBe(50);
+      expect(timeout.name).toBe("slow-step");
+    });
+  });
+
+  describe("step.withTimeout() method", () => {
+    it("works as shorthand for timeout options", async () => {
+      const result = await run(async (step) => {
+        return await step.withTimeout(
+          async () => {
+            await new Promise((r) => setTimeout(r, 10));
+            return ok("fast");
+          },
+          { ms: 1000, name: "timeout-step" }
+        );
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value).toBe("fast");
+      }
+    });
+  });
+
+  describe("isStepTimeoutError type guard", () => {
+    it("correctly identifies StepTimeoutError", () => {
+      const timeoutError: StepTimeoutError = {
+        type: "STEP_TIMEOUT",
+        timeoutMs: 5000,
+        stepName: "test",
+      };
+
+      expect(isStepTimeoutError(timeoutError)).toBe(true);
+      expect(isStepTimeoutError({ type: "OTHER_ERROR" })).toBe(false);
+      expect(isStepTimeoutError(null)).toBe(false);
+      expect(isStepTimeoutError(undefined)).toBe(false);
+    });
+  });
+});
+
+describe("Retry + Timeout Combined", () => {
+  it("applies timeout per-attempt and retries on timeout", async () => {
+    let attempts = 0;
+    const events: WorkflowEvent<unknown>[] = [];
+
+    const result = await run(
+      async (step) => {
+        return await step(
+          async () => {
+            attempts++;
+            if (attempts < 3) {
+              // First two attempts timeout
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+            return ok("success");
+          },
+          {
+            name: "retry-timeout-step",
+            timeout: { ms: 50 },
+            retry: {
+              attempts: 5,
+              backoff: "fixed",
+              initialDelay: 10,
+              jitter: false,
+              retryOn: (error) => isStepTimeoutError(error),
+            },
+          }
+        );
+      },
+      {
+        onEvent: (e) => events.push(e),
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(attempts).toBe(3);
+
+    // Should have 2 timeout events (first two attempts)
+    const timeoutEvents = events.filter((e) => e.type === "step_timeout");
+    expect(timeoutEvents).toHaveLength(2);
+
+    // Should have 2 retry events
+    const retryEvents = events.filter((e) => e.type === "step_retry");
+    expect(retryEvents).toHaveLength(2);
   });
 });

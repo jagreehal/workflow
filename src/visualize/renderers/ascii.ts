@@ -201,6 +201,17 @@ function renderStepNode(
     line += dim(` [${formatDuration(node.durationMs)}]`);
   }
 
+  // Add retry indicator if retries occurred
+  if (node.retryCount !== undefined && node.retryCount > 0) {
+    line += dim(` [${node.retryCount} ${node.retryCount === 1 ? "retry" : "retries"}]`);
+  }
+
+  // Add timeout indicator if step timed out
+  if (node.timedOut) {
+    const timeoutInfo = node.timeoutMs !== undefined ? ` ${node.timeoutMs}ms` : "";
+    line += dim(` [timeout${timeoutInfo}]`);
+  }
+
   return line;
 }
 

@@ -218,8 +218,18 @@ function renderStepNode(
     ioInfo += `\\nout: ${outputStr}`;
   }
 
+  // Add retry/timeout indicators
+  let retryInfo = "";
+  if (node.retryCount !== undefined && node.retryCount > 0) {
+    retryInfo += `\\n↻${node.retryCount}`;
+  }
+  if (node.timedOut) {
+    const timeoutStr = node.timeoutMs !== undefined ? `${node.timeoutMs}ms` : "";
+    retryInfo += `\\n⏱${timeoutStr}`;
+  }
+
   // Combine all label parts
-  const escapedLabel = (label + ioInfo + timing).trim();
+  const escapedLabel = (label + ioInfo + retryInfo + timing).trim();
 
   const stateClass = getStateClass(node.state);
 

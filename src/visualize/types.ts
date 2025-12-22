@@ -59,6 +59,12 @@ export interface BaseNode {
   input?: unknown;
   /** Output value from this step (for decision understanding) */
   output?: unknown;
+  /** Number of retry attempts made (0 = no retries, 1 = one retry, etc.) */
+  retryCount?: number;
+  /** Whether this step experienced a timeout (may have retried after) */
+  timedOut?: boolean;
+  /** Timeout duration in ms (if timed out) */
+  timeoutMs?: number;
 }
 
 /**

@@ -2,35 +2,301 @@
 
 Typed async workflows with automatic error inference. Build type-safe workflows with Result types, step caching, resume state, and human-in-the-loop support.
 
+**You've been here before:** You're debugging a production issue at 2am. The error says "Failed to load user data." But *why* did it fail? Was it the database? The cache? The API? TypeScript can't help you - it just sees `unknown` in every catch block.
+
+This library fixes that. Your errors become **first-class citizens** with full type inference, so TypeScript knows exactly what can go wrong before your code even runs.
+
 ```bash
 npm install @jagreehal/workflow
 ```
 
-## The Problem
+**What you get:**
+
+- **Automatic error inference** - Error types flow from your dependencies. Add a step? The union updates. Remove one? It updates. Zero manual tracking.
+- **Built-in reliability** - Retries, timeouts, caching, and circuit breakers when you need them. Not before.
+- **Resume & approvals** - Pause workflows for human review, persist state, pick up where you left off.
+- **Full visibility** - Event streams, ASCII timelines, Mermaid diagrams. See what ran, what failed, and why.
+
+## Quickstart (60 Seconds)
+
+### 1. Define your operations
+
+Return `ok(value)` or `err(errorCode)` instead of throwing.
 
 ```typescript
-// try/catch loses error attribution
-async function loadUserData(id: string) {
+import { ok, err, type AsyncResult } from '@jagreehal/workflow';
+
+const fetchOrder = async (id: string): AsyncResult<Order, 'ORDER_NOT_FOUND'> =>
+  id ? ok({ id, total: 99.99, email: 'user@example.com' }) : err('ORDER_NOT_FOUND');
+
+const chargeCard = async (amount: number): AsyncResult<Payment, 'CARD_DECLINED'> =>
+  amount < 10000 ? ok({ id: 'pay_123', amount }) : err('CARD_DECLINED');
+```
+
+### 2. Create and run
+
+`createWorkflow` handles the type magic. `step()` unwraps results or exits early on failure.
+
+```typescript
+import { createWorkflow } from '@jagreehal/workflow';
+
+const checkout = createWorkflow({ fetchOrder, chargeCard });
+
+const result = await checkout(async (step) => {
+  const order = await step(fetchOrder('order_456'));
+  const payment = await step(chargeCard(order.total));
+  return { order, payment };
+});
+// result.error is: 'ORDER_NOT_FOUND' | 'CARD_DECLINED' | UnexpectedError
+```
+
+That's it! TypeScript knows exactly what can fail. Now let's see the full power.
+
+## See It In Action
+
+**The async/await trap:**
+
+```typescript
+// ❌ TypeScript sees: Promise<{ user, posts }> - errors are invisible
+async function loadUserData(userId: string) {
   try {
-    const user = await fetchUser(id);
-    const posts = await fetchPosts(user.id);
+    const user = await fetchUser(userId);  // might throw 'NOT_FOUND'
+    const posts = await fetchPosts(user.id);  // might throw 'FETCH_ERROR'
     return { user, posts };
-  } catch {
-    return null; // What failed? Who knows.
+  } catch (e) {
+    // What went wrong? TypeScript has no idea.
+    // Was it NOT_FOUND? FETCH_ERROR? A network timeout?
+    throw new Error('Failed');  // All context lost
   }
 }
 ```
 
-## The Solution
+**With workflow:**
 
 ```typescript
-import { createWorkflow, ok, err, type AsyncResult } from '@jagreehal/workflow';
+// ✅ TypeScript knows: Result<{ user, posts }, 'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError>
+const loadUserData = createWorkflow({ fetchUser, fetchPosts });
+
+const userId = '123';
+const result = await loadUserData(async (step) => {
+  const user = await step(() => fetchUser(userId), {
+    retry: { attempts: 3, backoff: 'exponential' }
+  });
+  const posts = await step(() => fetchPosts(user.id));
+  return { user, posts };
+});
+
+if (result.ok) {
+  console.log(result.value.user.name);  // Fully typed
+} else {
+  switch (result.error) {
+    case 'NOT_FOUND': // handle missing user
+    case 'FETCH_ERROR': // handle posts failure
+  }
+}
+```
+
+The magic: error types are **inferred from your dependencies**. Add `fetchComments`? The error union updates automatically. You'll never `switch` on an error that can't happen, or miss one that can.
+
+## How It Works
+
+```mermaid
+flowchart TD
+    subgraph "step() unwraps Results, exits early on error"
+        S1["step(fetchUser)"] -->|ok| S2["step(fetchPosts)"]
+        S2 -->|ok| S3["step(sendEmail)"]
+        S3 -->|ok| S4["✓ Success"]
+
+        S1 -.->|error| EXIT["Return error"]
+        S2 -.->|error| EXIT
+        S3 -.->|error| EXIT
+    end
+```
+
+Each `step()` unwraps a `Result`. If it's `ok`, you get the value and continue. If it's an error, the workflow exits immediately, no manual `if (result.isErr())` checks needed. The happy path stays clean.
+
+---
+
+## Key Features
+
+### 🛡️ Built-in Reliability
+
+Add resilience exactly where you need it - no nested try/catch or custom retry loops.
+
+```typescript
+const result = await workflow(async (step) => {
+  // Retry 3 times with exponential backoff, timeout after 5 seconds
+  const user = await step.retry(
+    () => fetchUser('1'),
+    { attempts: 3, backoff: 'exponential', timeout: { ms: 5000 } }
+  );
+  return user;
+});
+```
+
+### 💾 Smart Caching (Never Double-Charge a Customer)
+
+Use stable keys to ensure a step only runs once, even if the workflow crashes and restarts.
+
+```typescript
+const result = await processPayment(async (step) => {
+  // If the workflow crashes after charging but before saving,
+  // the next run skips the charge - it's already cached.
+  const charge = await step(() => chargeCard(amount), {
+    key: `charge:${order.idempotencyKey}`,
+  });
+
+  await step(() => saveToDatabase(charge), {
+    key: `save:${charge.id}`,
+  });
+
+  return charge;
+});
+```
+
+### 🧑‍💻 Human-in-the-Loop
+
+Pause for manual approvals (large transfers, deployments, refunds) and resume exactly where you left off.
+
+```typescript
+const requireApproval = createApprovalStep({
+  key: 'approve:refund',
+  checkApproval: async () => {
+    const status = await db.getApprovalStatus('refund_123');
+    return status ? { status: 'approved', value: status } : { status: 'pending' };
+  },
+});
+
+const result = await refundWorkflow(async (step) => {
+  const refund = await step(calculateRefund(orderId));
+
+  // Workflow pauses here until someone approves
+  const approval = await step(requireApproval, { key: 'approve:refund' });
+
+  return await step(processRefund(refund, approval));
+});
+
+if (!result.ok && isPendingApproval(result.error)) {
+  // Notify Slack, send email, etc.
+  // Later: injectApproval(savedState, { stepKey, value })
+}
+```
+
+### 📊 Visualize What Happened
+
+Hook into the event stream to generate diagrams for logs, PRs, or dashboards.
+
+```typescript
+import { createVisualizer } from '@jagreehal/workflow/visualize';
+
+const viz = createVisualizer({ workflowName: 'checkout' });
+const workflow = createWorkflow({ fetchOrder, chargeCard }, {
+  onEvent: viz.handleEvent,
+});
+
+await workflow(async (step) => {
+  const order = await step(() => fetchOrder('order_456'), { name: 'Fetch order' });
+  const payment = await step(() => chargeCard(order.total), { name: 'Charge card' });
+  return { order, payment };
+});
+
+console.log(viz.renderAs('mermaid'));
+```
+
+---
+
+## Start Here
+
+Let's build something real in five short steps. Each one adds a single concept - by the end, you'll have a working workflow with typed errors, retries, and full observability.
+
+### Step 1 - Install
+
+```bash
+npm install @jagreehal/workflow
+# or
+pnpm add @jagreehal/workflow
+```
+
+### Step 2 - Describe Async Dependencies
+
+Define the units of work as `AsyncResult<T, E>` helpers. Results encode success (`ok`) or typed failure (`err`).
+
+```typescript
+import { ok, err, type AsyncResult } from '@jagreehal/workflow';
+
+type User = { id: string; name: string };
 
 const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND'> =>
   id === '1' ? ok({ id, name: 'Alice' }) : err('NOT_FOUND');
+```
 
+### Step 3 - Compose a Workflow
+
+`createWorkflow` collects dependencies once so the library can infer the total error union.
+
+```typescript
+import { createWorkflow } from '@jagreehal/workflow';
+
+const workflow = createWorkflow({ fetchUser });
+```
+
+### Step 4 - Run & Inspect Results
+
+Use `step()` inside the executor. It unwraps results, exits early on failure, and gives a typed `result` back to you.
+
+```typescript
+const result = await workflow(async (step) => {
+  const user = await step(fetchUser('1'));
+  return user;
+});
+
+if (result.ok) {
+  console.log(result.value.name);
+} else {
+  console.error(result.error); // 'NOT_FOUND' | UnexpectedError
+}
+```
+
+### Step 5 - Add Safeguards
+
+Introduce retries, timeout protection, or wrappers for throwing code only when you need them.
+
+```typescript
+const data = await workflow(async (step) => {
+  const user = await step(fetchUser('1'));
+
+  const posts = await step.try(
+    () => fetch(`/api/users/${user.id}/posts`).then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    }),
+    { error: 'FETCH_FAILED' as const }
+  );
+
+  return { user, posts };
+});
+```
+
+That's the foundation. Now let's build on it.
+
+---
+
+## Guided Tutorial
+
+We'll take a single workflow through four stages - from basic to production-ready. Each stage builds on the last, so you'll see how features compose naturally.
+
+### Stage 1 - Hello Workflow
+
+1. Declare dependencies (`fetchUser`, `fetchPosts`).
+2. Create the workflow: `const loadUserData = createWorkflow({ fetchUser, fetchPosts })`.
+3. Use `step()` to fan out and gather results.
+
+```typescript
 const fetchPosts = async (userId: string): AsyncResult<Post[], 'FETCH_ERROR'> =>
   ok([{ id: 1, title: 'Hello World' }]);
+
+const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND'> =>
+  id === '1' ? ok({ id, name: 'Alice' }) : err('NOT_FOUND');
 
 const loadUserData = createWorkflow({ fetchUser, fetchPosts });
 
@@ -39,33 +305,130 @@ const result = await loadUserData(async (step) => {
   const posts = await step(fetchPosts(user.id));
   return { user, posts };
 });
-
-// result.error: 'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError
-// ↑ Computed automatically from { fetchUser, fetchPosts }
 ```
 
-`step()` unwraps Results. On error, workflow exits early.
+### Stage 2 - Validation & Branching
 
-## More Examples
-
-### User signup with multiple steps
+Add validation helpers and watch the error union update automatically.
 
 ```typescript
 const validateEmail = async (email: string): AsyncResult<string, 'INVALID_EMAIL'> =>
   email.includes('@') ? ok(email) : err('INVALID_EMAIL');
 
-const checkDuplicate = async (email: string): AsyncResult<void, 'EMAIL_EXISTS'> => {
-  const exists = email === 'taken@example.com';
-  return exists ? err('EMAIL_EXISTS') : ok(undefined);
-};
+const signUp = createWorkflow({ validateEmail, fetchUser });
+
+const result = await signUp(async (step) => {
+  const email = await step(validateEmail('user@example.com'));
+  const user = await step(fetchUser(email));
+  return { email, user };
+});
+```
+
+### Stage 3 - Reliability Features
+
+Layer in retries, caching, and timeouts only around the calls that need them.
+
+```typescript
+const resilientWorkflow = createWorkflow({ fetchUser, fetchPosts }, {
+  cache: new Map(),
+});
+
+const result = await resilientWorkflow(async (step) => {
+  const user = await step(() => fetchUser('1'), {
+    key: 'user:1',
+    retry: { attempts: 3, backoff: 'exponential' },
+  });
+
+  const posts = await step.withTimeout(
+    () => fetchPosts(user.id),
+    { ms: 5000, name: 'Fetch posts' }
+  );
+
+  return { user, posts };
+});
+```
+
+### Stage 4 - Human-in-the-Loop & Resume
+
+Pause long-running workflows until an operator approves, then resume using persisted step results.
+
+```typescript
+import {
+  createApprovalStep,
+  createWorkflow,
+  injectApproval,
+  isPendingApproval,
+  isStepComplete,
+  type ResumeStateEntry,
+} from '@jagreehal/workflow';
+
+const savedSteps = new Map<string, ResumeStateEntry>();
+const requireApproval = createApprovalStep({
+  key: 'approval:deploy',
+  checkApproval: async () => ({ status: 'pending' }),
+});
+
+const gatedWorkflow = createWorkflow({ requireApproval }, {
+  onEvent: (event) => {
+    if (isStepComplete(event)) savedSteps.set(event.stepKey, { result: event.result, meta: event.meta });
+  },
+});
+
+const result = await gatedWorkflow(async (step) => step(requireApproval, { key: 'approval:deploy' }));
+
+if (!result.ok && isPendingApproval(result.error)) {
+  // later
+  injectApproval({ steps: savedSteps }, { stepKey: 'approval:deploy', value: { approvedBy: 'ops' } });
+}
+```
+
+## Try It Yourself
+
+- Open the [TypeScript Playground](https://www.typescriptlang.org/play) and paste any snippet from the tutorial.
+- Prefer running locally? Save a file, run `npx tsx workflow-demo.ts`, and iterate with real dependencies.
+- For interactive debugging, add `console.log` inside `onEvent` callbacks to visualize timing immediately.
+
+## Key Concepts
+
+| Concept | What it does |
+|---------|--------------|
+| **Result** | `ok(value)` or `err(error)` - typed success/failure, no exceptions |
+| **Workflow** | Wraps your dependencies and tracks their error types automatically |
+| **step()** | Unwraps a Result, short-circuits on failure, enables caching/retries |
+| **step.try** | Catches throws and converts them to typed errors |
+| **step.fromResult** | Preserves rich error objects from other Result-returning code |
+| **Events** | `onEvent` streams everything - timing, retries, failures - for visualization or logging |
+| **Resume** | Save completed steps, pick up later (great for approvals or crashes) |
+| **UnexpectedError** | Safety net for throws outside your declared union; use `strict` mode to force explicit handling |
+
+## Recipes & Patterns
+
+### Core Recipes
+
+#### Basic Workflow
+
+```typescript
+const result = await loadUserData(async (step) => {
+  const user = await step(fetchUser('1'));
+  const posts = await step(fetchPosts(user.id));
+  return { user, posts };
+});
+```
+
+#### User Signup
+
+```typescript
+const validateEmail = async (email: string): AsyncResult<string, 'INVALID_EMAIL'> =>
+  email.includes('@') ? ok(email) : err('INVALID_EMAIL');
+
+const checkDuplicate = async (email: string): AsyncResult<void, 'EMAIL_EXISTS'> =>
+  email === 'taken@example.com' ? err('EMAIL_EXISTS') : ok(undefined);
 
 const createAccount = async (email: string): AsyncResult<{ id: string }, 'DB_ERROR'> =>
   ok({ id: crypto.randomUUID() });
 
-const sendWelcome = async (userId: string): AsyncResult<void, 'EMAIL_FAILED'> =>
-  ok(undefined);
+const sendWelcome = async (userId: string): AsyncResult<void, 'EMAIL_FAILED'> => ok(undefined);
 
-// Declare deps → error union computed automatically
 const signUp = createWorkflow({ validateEmail, checkDuplicate, createAccount, sendWelcome });
 
 const result = await signUp(async (step) => {
@@ -75,11 +438,10 @@ const result = await signUp(async (step) => {
   await step(sendWelcome(account.id));
   return account;
 });
-
 // result.error: 'INVALID_EMAIL' | 'EMAIL_EXISTS' | 'DB_ERROR' | 'EMAIL_FAILED' | UnexpectedError
 ```
 
-### Checkout flow
+#### Checkout Flow
 
 ```typescript
 const authenticate = async (token: string): AsyncResult<{ userId: string }, 'UNAUTHORIZED'> =>
@@ -99,11 +461,10 @@ const result = await checkout(async (step) => {
   const payment = await step(chargeCard(order.total));
   return { userId: auth.userId, txId: payment.txId };
 });
-
 // result.error: 'UNAUTHORIZED' | 'ORDER_NOT_FOUND' | 'PAYMENT_FAILED' | UnexpectedError
 ```
 
-### Composing workflows
+#### Composing Workflows
 
 You can combine multiple workflows together. The error types automatically aggregate:
 
@@ -117,16 +478,7 @@ const validatePassword = async (pwd: string): AsyncResult<string, 'WEAK_PASSWORD
 
 const validationWorkflow = createWorkflow({ validateEmail, validatePassword });
 
-// Checkout workflow (from example above)
-const authenticate = async (token: string): AsyncResult<{ userId: string }, 'UNAUTHORIZED'> =>
-  token === 'valid' ? ok({ userId: 'user-1' }) : err('UNAUTHORIZED');
-
-const fetchOrder = async (id: string): AsyncResult<{ total: number }, 'ORDER_NOT_FOUND'> =>
-  ok({ total: 99 });
-
-const chargeCard = async (amount: number): AsyncResult<{ txId: string }, 'PAYMENT_FAILED'> =>
-  ok({ txId: 'tx-123' });
-
+// Checkout workflow
 const checkoutWorkflow = createWorkflow({ authenticate, fetchOrder, chargeCard });
 
 // Composed workflow: validation + checkout
@@ -139,94 +491,38 @@ const validateAndCheckout = createWorkflow({
   chargeCard,
 });
 
-const result = await validateAndCheckout(async (step, deps) => {
-  // Run validation workflow as a step (workflows return AsyncResult)
-  const validated = await step(() => validationWorkflow(async (innerStep) => {
-    const email = await innerStep(deps.validateEmail('user@example.com'));
-    const password = await innerStep(deps.validatePassword('secret123'));
-    return { email, password };
-  }));
-  
-  // Run checkout workflow as a step
-  const checkout = await step(() => checkoutWorkflow(async (innerStep) => {
-    const auth = await innerStep(deps.authenticate('valid'));
-    const order = await innerStep(deps.fetchOrder('order-1'));
-    const payment = await innerStep(deps.chargeCard(order.total));
-    return { userId: auth.userId, txId: payment.txId };
-  }));
-  
-  return { validated, checkout };
-});
-
-// result.error: 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'UNAUTHORIZED' | 'ORDER_NOT_FOUND' | 'PAYMENT_FAILED' | UnexpectedError
-// ↑ All error types from both workflows are automatically aggregated
-```
-
-**Alternative approach**: You can also combine workflows by including all their dependencies in a single workflow:
-
-```typescript
-// Simpler composition - combine all dependencies
-const composed = createWorkflow({
-  validateEmail,
-  validatePassword,
-  authenticate,
-  fetchOrder,
-  chargeCard,
-});
-
-const result = await composed(async (step, deps) => {
+const result = await validateAndCheckout(async (step) => {
   // Validation steps
-  const email = await step(deps.validateEmail('user@example.com'));
-  const password = await step(deps.validatePassword('secret123'));
+  const email = await step(validateEmail('user@example.com'));
+  const password = await step(validatePassword('secret123'));
   
   // Checkout steps
-  const auth = await step(deps.authenticate('valid'));
-  const order = await step(deps.fetchOrder('order-1'));
-  const payment = await step(deps.chargeCard(order.total));
+  const auth = await step(authenticate('valid'));
+  const order = await step(fetchOrder('order-1'));
+  const payment = await step(chargeCard(order.total));
   
   return { email, password, userId: auth.userId, txId: payment.txId };
 });
-// Same error union: 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'UNAUTHORIZED' | 'ORDER_NOT_FOUND' | 'PAYMENT_FAILED' | UnexpectedError
+// result.error: 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'UNAUTHORIZED' | 'ORDER_NOT_FOUND' | 'PAYMENT_FAILED' | UnexpectedError
 ```
 
-### Wrapping throwing APIs with step.try
+### Common Patterns
 
-```typescript
-const workflow = createWorkflow({ fetchUser });
+- **Validation & gating** – Run early workflows so later steps never execute for invalid data.
 
-const result = await workflow(async (step) => {
-  const user = await step(fetchUser('1'));
+  ```typescript
+  const validated = await step(() => validationWorkflow(async (inner) => inner(deps.validateEmail(email))));
+  ```
 
-  // step.try catches throws and rejections → typed error
-  const response = await step.try(
-    () => fetch(`/api/posts/${user.id}`).then(r => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    }),
-    { error: 'FETCH_FAILED' as const }
-  );
+- **API calls with typed errors** – Wrap fetch/axios via `step.try` and switch on the union later.
 
-  const posts = await step.try(
-    () => JSON.parse(response),
-    { error: 'PARSE_FAILED' as const }
-  );
+  ```typescript
+  const payload = await step.try(() => fetch(url).then((r) => r.json()), { error: 'HTTP_FAILED' });
+  ```
 
-  return { user, posts };
-});
+- **Wrapping Result-returning functions** – Use `step.fromResult` to preserve rich error types.
 
-// result.error: 'NOT_FOUND' | 'FETCH_FAILED' | 'PARSE_FAILED' | UnexpectedError
-```
-
-### Wrapping Result-returning functions with step.fromResult
-
-When calling functions that return `Result<T, E>`, use `step.fromResult()` to map their typed errors:
-
-```typescript
-// callProvider returns Result<Response, ProviderError>
-const callProvider = async (input: string): AsyncResult<Response, ProviderError> => { ... };
-
-const result = await workflow(async (step) => {
-  // step.fromResult gives you typed errors in onError (not unknown like step.try)
+  ```typescript
   const response = await step.fromResult(
     () => callProvider(input),
     {
@@ -237,61 +533,247 @@ const result = await workflow(async (step) => {
       })
     }
   );
+  ```
 
-  return response;
+- **Retries, backoff, and timeouts** – Built into `step.retry()` and `step.withTimeout()`.
+
+  ```typescript
+  const data = await step.retry(
+    () => step.withTimeout(() => fetchData(), { ms: 2000 }),
+    { attempts: 3, backoff: 'exponential', retryOn: (error) => error !== 'FATAL' }
+  );
+  ```
+
+- **State save & resume** – Persist step completions and resume later.
+
+  ```typescript
+  import { createWorkflow, isStepComplete, type ResumeStateEntry } from '@jagreehal/workflow';
+
+  const savedSteps = new Map<string, ResumeStateEntry>();
+  const workflow = createWorkflow(deps, {
+    onEvent: (event) => {
+      if (isStepComplete(event)) savedSteps.set(event.stepKey, { result: event.result, meta: event.meta });
+    },
+  });
+  const resumed = createWorkflow(deps, { resumeState: { steps: savedSteps } });
+  ```
+
+- **Human-in-the-loop approvals** – Pause a workflow until someone approves.
+
+  ```typescript
+  import { createApprovalStep, isPendingApproval, injectApproval } from '@jagreehal/workflow';
+
+  const requireApproval = createApprovalStep({ key: 'approval:deploy', checkApproval: async () => {/* ... */} });
+  const result = await workflow(async (step) => step(requireApproval, { key: 'approval:deploy' }));
+
+  if (!result.ok && isPendingApproval(result.error)) {
+    // notify operators, later call injectApproval(savedState, { stepKey, value })
+  }
+  ```
+
+- **Caching & deduplication** – Give steps names + keys.
+
+  ```typescript
+  const user = await step(() => fetchUser(id), { name: 'Fetch user', key: `user:${id}` });
+  ```
+
+- **Branching logic** - It's just JavaScript - use normal `if`/`switch`.
+
+  ```typescript
+  const user = await step(fetchUser(id));
+
+  if (user.role === 'admin') {
+    return await step(fetchAdminDashboard(user.id));
+  }
+
+  if (user.subscription === 'free') {
+    return await step(fetchFreeTierData(user.id));
+  }
+
+  return await step(fetchPremiumData(user.id));
+  ```
+
+- **Parallel operations** – Use helpers when you truly need concurrency.
+
+  ```typescript
+  import { allAsync, partition, map } from '@jagreehal/workflow';
+
+  const result = await allAsync([
+    fetchUser('1'),
+    fetchPosts('1'),
+  ]);
+  const data = map(result, ([user, posts]) => ({ user, posts }));
+  ```
+
+## Real-World Example: Safe Payment Retries
+
+The scariest failure mode in payments: **charge succeeded, but persistence failed**. If you retry naively, you charge the customer twice.
+
+Step keys solve this. Once a step succeeds, it's cached - retries skip it automatically:
+
+```typescript
+const processPayment = createWorkflow({ validateCard, chargeProvider, persistResult });
+
+const result = await processPayment(async (step) => {
+  const card = await step(() => validateCard(input), { key: 'validate' });
+
+  // This is the dangerous step. Once it succeeds, never repeat it:
+  const charge = await step(() => chargeProvider(card), {
+    key: `charge:${input.idempotencyKey}`,
+  });
+
+  // If THIS fails (DB down), you can rerun the workflow later.
+  // The charge step is cached - it won't execute again.
+  await step(() => persistResult(charge), { key: `persist:${charge.id}` });
+
+  return { paymentId: charge.id };
 });
 ```
 
-Unlike `step.try()` where `onError` receives `unknown`, `step.fromResult()` preserves the error type.
+Crash after charging but before persisting? Rerun the workflow. The charge step returns its cached result. No double-billing.
 
-### Parallel operations
+## Is This Library Right for You?
 
-```typescript
-import { allAsync, partition, map } from '@jagreehal/workflow';
+```mermaid
+flowchart TD
+    Start([Need typed errors?]) --> Simple{Simple use case?}
 
-// First error wins
-const result = await allAsync([
-  fetchUser('1'),
-  fetchPosts('1'),
-]);
-const data = map(result, ([user, posts]) => ({ user, posts }));
+    Simple -->|Yes| TryCatch["try/catch is fine"]
+    Simple -->|No| WantAsync{Want async/await syntax?}
 
-// Collect all results, even failures
-const results = await Promise.all(userIds.map(id => fetchUser(id)));
-const { values: users, errors } = partition(results);
+    WantAsync -->|Yes| NeedOrchestration{Need retries/caching/resume?}
+    WantAsync -->|No| Neverthrow["Consider neverthrow"]
+
+    NeedOrchestration -->|Yes| Workflow["✓ @jagreehal/workflow"]
+    NeedOrchestration -->|No| Either["Either works - workflow adds room to grow"]
+
+    style Workflow fill:#E8F5E9
 ```
 
-### Consuming results
+**Choose this library when:**
 
+- You want Result types with familiar async/await syntax
+- You need automatic error type inference
+- You're building workflows that benefit from step caching or resume
+- You want type-safe error handling without Effect's learning curve
+
+## How It Compares
+
+**`try/catch` everywhere** - You lose error types. Every catch block sees `unknown`. Retries? Manual. Timeouts? Manual. Observability? Hope you remembered to add logging.
+
+**Result-only libraries** (fp-ts, neverthrow) - Great for typed errors in pure functions. But when you need retries, caching, timeouts, or human approvals, you're back to wiring it yourself.
+
+**This library** - Typed errors *plus* the orchestration primitives. Error inference flows from your dependencies. Retries, timeouts, caching, resume, and visualization are built in - use them when you need them.
+
+### vs neverthrow
+
+| Aspect | neverthrow | workflow |
+|--------|-----------|----------|
+| **Chaining style** | `.andThen()` method chains (nest with 3+ ops) | `step()` with async/await (stays flat) |
+| **Error inference** | Manual: `type Errors = 'A' \| 'B' \| 'C'` | Automatic from `createWorkflow({ deps })` |
+| **Result access** | `.isOk()`, `.isErr()` methods | `.ok` boolean property |
+| **Wrapping throws** | `ResultAsync.fromPromise(p, mapErr)` | `step.try(fn, { error })` or wrap in AsyncResult |
+| **Parallel ops** | `ResultAsync.combine([...])` | `allAsync([...])` |
+| **Retries** | DIY with recursive `.orElse()` | Built-in `step.retry({ attempts, backoff })` |
+| **Timeouts** | DIY with `Promise.race()` | Built-in `step.withTimeout({ ms })` |
+| **Caching** | DIY | Built-in with `{ key: 'cache-key' }` |
+| **Resume/persist** | DIY | Built-in with `resumeState` + `isStepComplete()` |
+| **Events** | DIY | 15+ event types via `onEvent` |
+
+**When to use neverthrow:** You want typed Results with minimal bundle size and prefer functional chaining.
+
+**When to use workflow:** You want typed Results with async/await syntax, automatic error inference, and built-in reliability primitives.
+
+See [Coming from neverthrow](docs/coming-from-neverthrow.md) for pattern-by-pattern equivalents.
+
+### Where workflow shines
+
+**Complex checkout flows:**
 ```typescript
-if (result.ok) {
-  console.log(result.value.user.name);
-} else {
-  console.log(result.error); // Typed error union
+// 5 different error types, all automatically inferred
+const checkout = createWorkflow({ validateCart, checkInventory, getPricing, processPayment, createOrder });
+
+const result = await checkout(async (step) => {
+  const cart = await step(() => validateCart(input));
+
+  // Parallel execution stays clean
+  const [inventory, pricing] = await step(() => allAsync([
+    checkInventory(cart.items),
+    getPricing(cart.items)
+  ]));
+
+  const payment = await step(() => processPayment(cart, pricing.total));
+  return await step(() => createOrder(cart, payment));
+});
+// TypeScript knows: Result<Order, ValidationError | InventoryError | PricingError | PaymentError | OrderError>
+```
+
+**Branching logic with native control flow:**
+```typescript
+// Just JavaScript - no functional gymnastics
+const tenant = await step(() => fetchTenant(id));
+
+if (tenant.plan === 'free') {
+  return await step(() => calculateFreeUsage(tenant));
 }
+
+// Variables from earlier steps are in scope - no closure drilling
+const [users, resources] = await step(() => allAsync([fetchUsers(), fetchResources()]));
+
+switch (tenant.plan) {
+  case 'pro': await step(() => sendProNotification(tenant)); break;
+  case 'enterprise': await step(() => sendEnterpriseNotification(tenant)); break;
+}
+```
+
+**Data pipelines with caching and resume:**
+```typescript
+const pipeline = createWorkflow(deps, { cache: new Map() });
+
+const result = await pipeline(async (step) => {
+  // `key` enables caching and resume from last successful step
+  const user = await step(() => fetchUser(id), { key: 'user' });
+  const posts = await step(() => fetchPosts(user.id), { key: 'posts' });
+  const comments = await step(() => fetchComments(posts), { key: 'comments' });
+  return { user, posts, comments };
+}, { resumeState: savedState });
 ```
 
 ## Quick Reference
 
-| Function | What it does |
-|----------|--------------|
-| `createWorkflow(deps)` | Create workflow with auto-inferred error types |
-| `run(callback, options)` | Execute workflow with manual error types |
-| `step(op())` | Unwrap Result or exit early |
-| `step.try(fn, { error })` | Catch throws/rejects → typed error |
-| `step.fromResult(fn, { onError })` | Map Result errors with typed onError |
-| `step.retry(fn, opts)` | Retry with backoff on failure |
-| `step.withTimeout(fn, { ms })` | Timeout after specified duration |
-| `ok(value)` / `err(error)` | Create Results |
-| `map`, `andThen`, `match` | Transform Results |
-| `allAsync`, `partition` | Batch operations |
-| `isStepTimeoutError(e)` | Check if error is a timeout |
-| `getStepTimeoutMeta(e)` | Get timeout metadata from error |
-| `createCircuitBreaker(name, config)` | Create circuit breaker for step protection |
-| `createSagaWorkflow(deps, opts)` | Create saga with auto-compensation |
-| `createRateLimiter(name, config)` | Control step throughput |
-| `createWebhookHandler(workflow, fn, config)` | Expose workflow as HTTP endpoint |
-| `createWorkflowHarness(deps, opts)` | Create test harness for workflows |
+### Workflow Builders
+
+| API | Description |
+|-----|-------------|
+| `createWorkflow(deps, opts?)` | Reusable workflow with automatic error unions, caching, resume, events, strict mode. |
+| `run(executor, opts?)` | One-off workflow; you supply `Output` and `Error` generics manually. |
+| `createSagaWorkflow(deps, opts?)` | Workflow with automatic compensation handlers. |
+| `createWorkflowHarness(deps, opts?)` | Testing harness with deterministic step control. |
+
+### Step Helpers
+
+| API | Description |
+|-----|-------------|
+| `step(op, meta?)` | Execute a dependency or thunk. Supports `{ key, name, retry, timeout }`. |
+| `step.try(fn, { error })` | Catch throws/rejections and emit a typed error. |
+| `step.fromResult(fn, { onError })` | Preserve rich error objects from other Result-returning code. |
+| `step.retry(fn, opts)` | Retries with fixed/linear/exponential backoff, jitter, and predicates. |
+| `step.withTimeout(fn, { ms, signal?, name? })` | Auto-timeout operations and optionally pass AbortSignal. |
+
+### Result & Utility Helpers
+
+| API | Description |
+|-----|-------------|
+| `ok(value)` / `err(error)` | Construct Results. |
+| `map`, `mapError`, `bimap` | Transform values or errors. |
+| `andThen`, `match` | Chain or pattern-match Results. |
+| `orElse`, `recover` | Error recovery and fallback patterns. |
+| `allAsync`, `partition` | Batch operations where the first error wins or you collect everything. |
+| `isStepTimeoutError(error)` | Runtime guard for timeout failures. |
+| `getStepTimeoutMeta(error)` | Inspect timeout metadata (attempt, ms, name). |
+| `createCircuitBreaker(name, config)` | Guard dependencies with open/close behavior. |
+| `createRateLimiter(name, config)` | Ensure steps respect throughput policies. |
+| `createWebhookHandler(workflow, fn, config)` | Turn workflows into HTTP handlers quickly. |
 
 ### Choosing Between run() and createWorkflow()
 
@@ -328,180 +810,37 @@ const loadUser = createWorkflow({ fetchUser, fetchPosts });
 ### Import paths
 
 ```typescript
-import { createWorkflow, ok, err } from '@jagreehal/workflow';           // Full library
-import { createWorkflow } from '@jagreehal/workflow/workflow';            // Workflow only
-import { ok, err, map, all } from '@jagreehal/workflow/core';             // Primitives only
+import { createWorkflow, ok, err } from '@jagreehal/workflow';
+import { createWorkflow } from '@jagreehal/workflow/workflow';
+import { ok, err, map, all } from '@jagreehal/workflow/core';
 ```
 
-## Advanced
+## Common Pitfalls
 
-**You don't need this on day one.** The core is `createWorkflow`, `step`, and `step.try`.
+**Use thunks for caching.** `step(fetchUser('1'))` executes immediately. Use `step(() => fetchUser('1'), { key })` for caching to work.
 
-### Step caching
+**Keys must be stable.** Use `user:${id}`, not `user:${Date.now()}`.
 
-Cache expensive operations by adding `{ key }`:
+**Don't cache writes blindly.** Payments need carefully designed idempotency keys.
 
-```typescript
-const cache = new Map<string, Result<unknown, unknown>>();
-const workflow = createWorkflow({ fetchUser }, { cache });
+## Troubleshooting & FAQ
 
-const result = await workflow(async (step) => {
-  // Wrap in function + add key for caching
-  const user = await step(() => fetchUser('1'), { key: 'user:1' });
+- **Why is `UnexpectedError` in my union?** Add `{ strict: true, catchUnexpected: () => 'UNEXPECTED' }` when creating the workflow to map unknown errors explicitly.
+- **How do I inspect what ran?** Pass `onEvent` and log `step_*` / `workflow_*` events or feed them into `createIRBuilder()` for diagrams.
+- **A workflow is stuck waiting for approval. Now what?** Use `isPendingApproval(error)` to detect the state, notify operators, then call `injectApproval(state, { stepKey, value })` to resume.
+- **Cache is not used between runs.** Supply a stable `{ key }` per step and provide a cache/resume adapter in `createWorkflow(deps, { cache })`.
+- **I only need a single run with dynamic dependencies.** Use `run()` instead of `createWorkflow()` and pass dependencies directly to the executor.
 
-  // Same key = cache hit (fetchUser not called again)
-  const userAgain = await step(() => fetchUser('1'), { key: 'user:1' });
+## Visualizing Workflows
 
-  return user;
-});
-```
-
-### Retry with backoff
-
-Automatically retry failed steps with configurable backoff:
+Hook into the event stream and render diagrams for docs, PRs, or dashboards:
 
 ```typescript
-const result = await workflow(async (step) => {
-  // Retry up to 3 times with exponential backoff
-  const data = await step.retry(
-    () => fetchData(),
-    {
-      attempts: 3,
-      backoff: 'exponential',  // 'fixed' | 'linear' | 'exponential'
-      initialDelay: 100,       // ms
-      maxDelay: 5000,          // cap delay at 5s
-      jitter: true,            // add randomness to prevent thundering herd
-      retryOn: (error) => error !== 'FATAL',  // custom retry predicate
-    }
-  );
-  return data;
-});
-```
+import { createVisualizer } from '@jagreehal/workflow/visualize';
 
-Or use retry options directly on `step()`:
-
-```typescript
-const user = await step(() => fetchUser(id), {
-  key: 'user:1',
-  retry: { attempts: 3, backoff: 'exponential' },
-});
-```
-
-### Timeout
-
-Prevent steps from hanging with timeouts:
-
-```typescript
-const result = await workflow(async (step) => {
-  // Timeout after 5 seconds
-  const data = await step.withTimeout(
-    () => slowOperation(),
-    { ms: 5000, name: 'slow-op' }
-  );
-  return data;
-});
-```
-
-With AbortSignal for cancellable operations:
-
-```typescript
-const data = await step.withTimeout(
-  (signal) => fetch('/api/data', { signal }),
-  { ms: 5000, signal: true }  // pass signal to operation
-);
-```
-
-Combine retry and timeout - each attempt gets its own timeout:
-
-```typescript
-const data = await step.retry(
-  () => fetchData(),
-  {
-    attempts: 3,
-    timeout: { ms: 2000 },  // 2s timeout per attempt
-  }
-);
-```
-
-Detecting timeout errors:
-
-```typescript
-import { isStepTimeoutError, getStepTimeoutMeta } from '@jagreehal/workflow';
-
-if (!result.ok && isStepTimeoutError(result.error)) {
-  const meta = getStepTimeoutMeta(result.error);
-  console.log(`Timed out after ${meta?.timeoutMs}ms on attempt ${meta?.attempt}`);
-}
-```
-
-### State save & resume
-
-Save step results for workflow replay:
-
-```typescript
-import { createWorkflow, isStepComplete, type ResumeStateEntry } from '@jagreehal/workflow';
-
-const savedSteps = new Map<string, ResumeStateEntry>();
-const userId = '123';
-
-const workflow = createWorkflow({ fetchUser, requireApproval }, {
-  onEvent: (event) => {
-    if (isStepComplete(event)) {
-      savedSteps.set(event.stepKey, { result: event.result, meta: event.meta });
-    }
-  }
-});
-
-// First run
-const result = await workflow(async (step) => {
-  const user = await step(() => fetchUser(userId), { key: `user:${userId}` });
-  const approval = await step(() => requireApproval(user.id), { key: `approval:${userId}` });
-  return { user, approval };
-});
-
-// Resume later
-const workflow2 = createWorkflow({ fetchUser, requireApproval }, {
-  resumeState: { steps: savedSteps }
-});
-// Cached steps are skipped on resume
-```
-
-### Strict mode (closed error unions)
-
-Remove `UnexpectedError` from the union:
-
-```typescript
-const workflow = createWorkflow(
-  { fetchUser, fetchPosts },
-  { strict: true, catchUnexpected: () => 'UNEXPECTED' as const }
-);
-
-// result.error: 'NOT_FOUND' | 'FETCH_ERROR' | 'UNEXPECTED' (exactly)
-```
-
-### Event stream
-
-```typescript
-const workflow = createWorkflow({ fetchUser }, {
-  onEvent: (event) => {
-    // workflow_start | workflow_success | workflow_error
-    // step_start | step_success | step_error | step_complete
-    // step_retry | step_timeout | step_retries_exhausted
-    console.log(event.type, event.durationMs);
-  }
-});
-```
-
-### Visualization
-
-Render workflow execution as ASCII art or Mermaid diagrams:
-
-```typescript
-import { createIRBuilder, renderToAscii, renderToMermaid } from '@jagreehal/workflow/visualize';
-
-const builder = createIRBuilder();
+const viz = createVisualizer({ workflowName: 'user-posts-flow' });
 const workflow = createWorkflow({ fetchUser, fetchPosts }, {
-  onEvent: (event) => builder.addEvent(event),
+  onEvent: viz.handleEvent,
 });
 
 await workflow(async (step) => {
@@ -510,69 +849,44 @@ await workflow(async (step) => {
   return { user, posts };
 });
 
-// ASCII output
-console.log(renderToAscii(builder.getIR()));
-// ┌── my-workflow ──────────────────────────┐
-// │  ✓ Fetch user [150ms]                   │
-// │  ✓ Fetch posts [89ms]                   │
-// │  Completed in 240ms                     │
-// └─────────────────────────────────────────┘
+// ASCII output for terminal/CLI
+console.log(viz.render());
 
-// Mermaid output (for docs, GitHub, etc.)
-console.log(renderToMermaid(builder.getIR()));
+// Mermaid diagram for Markdown/docs
+console.log(viz.renderAs('mermaid'));
+
+// JSON IR for programmatic access
+console.log(viz.renderAs('json'));
 ```
 
-Visualization includes retry and timeout indicators:
+Mermaid output drops directly into Markdown for documentation. The ASCII block is handy for CLI screenshots or incident runbooks.
 
-```
-✓ Fetch data [500ms] [2 retries] [timeout 5000ms]
-```
-
-### Human-in-the-loop
+**For post-execution visualization**, collect events and visualize later:
 
 ```typescript
-import { createApprovalStep, isPendingApproval, injectApproval } from '@jagreehal/workflow';
+import { createEventCollector } from '@jagreehal/workflow/visualize';
 
-const requireApproval = createApprovalStep<{ approvedBy: string }>({
-  key: 'approval:deploy',
-  checkApproval: async () => {
-    const status = await db.getApproval('deploy');
-    if (!status) return { status: 'pending' };
-    return { status: 'approved', value: { approvedBy: status.approver } };
-  },
+const collector = createEventCollector({ workflowName: 'my-workflow' });
+const workflow = createWorkflow({ fetchUser, fetchPosts }, {
+  onEvent: collector.handleEvent,
 });
 
-const result = await workflow(async (step) => {
-  const approval = await step(requireApproval, { key: 'approval:deploy' });
-  return approval;
-});
+await workflow(async (step) => { /* ... */ });
 
-if (!result.ok && isPendingApproval(result.error)) {
-  // Workflow paused, waiting for approval
-  // Later: injectApproval(savedState, { stepKey, value }) to resume
-}
+// Visualize collected events
+console.log(collector.visualize());
+console.log(collector.visualizeAs('mermaid'));
 ```
 
-### More utilities
+## Keep Going
 
-See [docs/advanced.md](docs/advanced.md) for:
-- Batch operations (`all`, `allSettled`, `partition`)
-- Result transformers (`map`, `andThen`, `match`)
-- Circuit breaker pattern
-- Saga/compensation pattern for rollbacks
-- Rate limiting and concurrency control
-- Workflow versioning and migrations
-- Pluggable persistence adapters
-- Webhook and event trigger adapters
-- Policy-driven step middleware
-- Developer tools and visualization
-- HITL orchestration helpers
-- Deterministic testing harness
-- OpenTelemetry integration
+**Already using neverthrow?** [The migration guide](docs/coming-from-neverthrow.md) shows pattern-by-pattern equivalents - you'll feel at home quickly.
 
-## API Reference
+**Ready for production features?** [Advanced usage](docs/advanced.md) covers sagas, circuit breakers, rate limiting, persistence adapters, and HITL orchestration.
 
-See [docs/api.md](docs/api.md).
+**Need the full API?** [API reference](docs/api.md) has everything in one place.
+
+---
 
 ## License
 

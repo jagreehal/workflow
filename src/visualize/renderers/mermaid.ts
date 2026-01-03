@@ -25,18 +25,24 @@ import { formatDuration } from "../utils/timing";
 
 /**
  * Get Mermaid class definition for step states.
+ * Colors inspired by AWS Step Functions and XState visualizers for professional appearance.
  */
 function getStyleDefinitions(): string[] {
   return [
-    "    classDef pending fill:#e5e7eb,stroke:#9ca3af,color:#374151",
-    "    classDef running fill:#fef3c7,stroke:#f59e0b,color:#92400e",
-    "    classDef success fill:#d1fae5,stroke:#10b981,color:#065f46",
-    "    classDef error fill:#fee2e2,stroke:#ef4444,color:#991b1b",
-    "    classDef aborted fill:#f3f4f6,stroke:#6b7280,color:#4b5563",
-    "    classDef cached fill:#dbeafe,stroke:#3b82f6,color:#1e40af",
-    // Note: Use a lighter fill color to distinguish skipped steps visually
-    // Mermaid classDef only supports: fill, stroke, color, stroke-width (without px unit)
-    "    classDef skipped fill:#f9fafb,stroke:#d1d5db,color:#6b7280",
+    // Pending - light gray, subtle
+    "    classDef pending fill:#f3f4f6,stroke:#9ca3af,stroke-width:2px,color:#374151",
+    // Running - amber/yellow, indicates active execution
+    "    classDef running fill:#fef3c7,stroke:#f59e0b,stroke-width:3px,color:#92400e",
+    // Success - green, clear positive indicator
+    "    classDef success fill:#d1fae5,stroke:#10b981,stroke-width:3px,color:#065f46",
+    // Error - red, clear negative indicator
+    "    classDef error fill:#fee2e2,stroke:#ef4444,stroke-width:3px,color:#991b1b",
+    // Aborted - gray, indicates cancellation
+    "    classDef aborted fill:#f3f4f6,stroke:#6b7280,stroke-width:2px,color:#4b5563,stroke-dasharray: 5 5",
+    // Cached - blue, indicates cache hit
+    "    classDef cached fill:#dbeafe,stroke:#3b82f6,stroke-width:3px,color:#1e40af",
+    // Skipped - light gray with dashed border
+    "    classDef skipped fill:#f9fafb,stroke:#d1d5db,stroke-width:2px,color:#6b7280,stroke-dasharray: 5 5",
   ];
 }
 
@@ -116,9 +122,9 @@ export function mermaidRenderer(): Renderer {
       // Diagram header
       lines.push("flowchart TD");
 
-      // Start node
+      // Start node - more visually distinctive
       const startId = "start";
-      lines.push(`    ${startId}((Start))`);
+      lines.push(`    ${startId}(("▶ Start"))`);
 
       // Track the last node for connections
       let prevNodeId = startId;
@@ -130,11 +136,12 @@ export function mermaidRenderer(): Renderer {
         prevNodeId = result.exitId;
       }
 
-      // End node (if workflow completed)
+      // End node (if workflow completed) - more visually distinctive
       if (ir.root.state === "success" || ir.root.state === "error") {
         const endId = "finish";
-        const endShape =
-          ir.root.state === "success" ? `((Done))` : `((Failed))`;
+        const endIcon = ir.root.state === "success" ? "✓" : "✗";
+        const endLabel = ir.root.state === "success" ? "Done" : "Failed";
+        const endShape = `(("${endIcon} ${endLabel}"))`;
         const endClass =
           ir.root.state === "success" ? ":::success" : ":::error";
         lines.push(`    ${endId}${endShape}${endClass}`);
@@ -202,6 +209,26 @@ function renderStepNode(
       ? ` ${formatDuration(node.durationMs)}`
       : "";
 
+  // Add visual indicators based on state (like XState/AWS Step Functions)
+  let stateIcon = "";
+  switch (node.state) {
+    case "success":
+      stateIcon = "✓ ";
+      break;
+    case "error":
+      stateIcon = "✗ ";
+      break;
+    case "cached":
+      stateIcon = "💾 ";
+      break;
+    case "running":
+      stateIcon = "⏳ ";
+      break;
+    case "skipped":
+      stateIcon = "⊘ ";
+      break;
+  }
+
   // Add input/output info if available
   // Use newlines for multi-line labels, but escape special characters
   let ioInfo = "";
@@ -218,34 +245,38 @@ function renderStepNode(
     ioInfo += `\\nout: ${outputStr}`;
   }
 
-  // Add retry/timeout indicators
+  // Add retry/timeout indicators with icons
   let retryInfo = "";
   if (node.retryCount !== undefined && node.retryCount > 0) {
-    retryInfo += `\\n↻${node.retryCount}`;
+    retryInfo += `\\n↻ ${node.retryCount} retr${node.retryCount === 1 ? "y" : "ies"}`;
   }
   if (node.timedOut) {
     const timeoutStr = node.timeoutMs !== undefined ? `${node.timeoutMs}ms` : "";
-    retryInfo += `\\n⏱${timeoutStr}`;
+    retryInfo += `\\n⏱ timeout ${timeoutStr}`;
   }
 
-  // Combine all label parts
-  const escapedLabel = (label + ioInfo + retryInfo + timing).trim();
+  // Combine all label parts with icon
+  const escapedLabel = (stateIcon + label + ioInfo + retryInfo + timing).trim();
 
   const stateClass = getStateClass(node.state);
 
-  // Use different shapes based on state
+  // Use different shapes based on state (like AWS Step Functions)
   let shape: string;
   switch (node.state) {
     case "error":
+      // Hexagon for errors (more distinctive)
       shape = `{{${escapedLabel}}}`;
       break;
     case "cached":
+      // Rounded rectangle with double border for cached
       shape = `[(${escapedLabel})]`;
       break;
     case "skipped":
+      // Dashed border for skipped
       shape = `[${escapedLabel}]:::skipped`;
       break;
     default:
+      // Standard rectangle for normal steps
       shape = `[${escapedLabel}]`;
   }
 
@@ -266,15 +297,30 @@ function renderParallelNode(
   const forkId = `${subgraphId}_fork`;
   const joinId = `${subgraphId}_join`;
   const name = escapeSubgraphName(node.name ?? "Parallel");
+  const modeLabel = node.mode === "allSettled" ? " (allSettled)" : "";
 
-  // Subgraph for parallel block
-  lines.push(`    subgraph ${subgraphId}[${name}]`);
+  // If no children, render as a simple step-like node with note
+  if (node.children.length === 0) {
+    const id = subgraphId;
+    const label = escapeMermaidText(`${name}${modeLabel}`);
+    const note = "operations not individually tracked";
+    const timing = options.showTimings && node.durationMs !== undefined
+      ? ` ${formatDuration(node.durationMs)}`
+      : "";
+    
+    // Use a rounded rectangle to indicate it's a parallel operation
+    lines.push(`    ${id}[${label}${timing}\\n${note}]:::${getStateClass(node.state)}`);
+    return { entryId: id, exitId: id };
+  }
+
+  // Subgraph for parallel block with proper visual hierarchy
+  lines.push(`    subgraph ${subgraphId}["${name}${modeLabel}"]`);
   lines.push(`    direction TB`);
 
-  // Fork node (diamond)
-  lines.push(`    ${forkId}{Fork}`);
+  // Fork node (diamond) - more visually distinct
+  lines.push(`    ${forkId}{"⚡ Fork"}`);
 
-  // Child branches
+  // Child branches - render in parallel columns
   const childExitIds: string[] = [];
   for (const child of node.children) {
     const result = renderNode(child, options, lines);
@@ -282,15 +328,15 @@ function renderParallelNode(
     childExitIds.push(result.exitId);
   }
 
-  // Join node (diamond)
-  lines.push(`    ${joinId}{Join}`);
+  // Join node (diamond) - visually distinct
+  lines.push(`    ${joinId}{"✓ Join"}`);
   for (const exitId of childExitIds) {
     lines.push(`    ${exitId} --> ${joinId}`);
   }
 
   lines.push(`    end`);
 
-  // Apply state styling to subgraph via a connecting node
+  // Apply state styling to subgraph
   const stateClass = getStateClass(node.state);
   lines.push(`    class ${subgraphId} ${stateClass}`);
 
@@ -310,33 +356,53 @@ function renderRaceNode(
   const endId = `${subgraphId}_end`;
   const name = escapeSubgraphName(node.name ?? "Race");
 
+  // If no children, render as a simple step-like node with note
+  if (node.children.length === 0) {
+    const id = subgraphId;
+    const label = escapeMermaidText(name);
+    const note = "operations not individually tracked";
+    const timing = options.showTimings && node.durationMs !== undefined
+      ? ` ${formatDuration(node.durationMs)}`
+      : "";
+    
+    lines.push(`    ${id}[⚡ ${label}${timing}\\n${note}]:::${getStateClass(node.state)}`);
+    return { entryId: id, exitId: id };
+  }
+
   // Subgraph for race block - escape name and emoji is safe in quoted strings
   lines.push(`    subgraph ${subgraphId}["⚡ ${name}"]`);
   lines.push(`    direction TB`);
 
-  // Start node
-  lines.push(`    ${startId}((Race))`);
+  // Start node - use a more distinctive shape
+  lines.push(`    ${startId}(("🏁 Start"))`);
 
   // Child branches
-  const childExitIds: string[] = [];
+  const childExitIds: Array<{ exitId: string; isWinner: boolean }> = [];
+  let winnerExitId: string | undefined;
+  
   for (const child of node.children) {
     const result = renderNode(child, options, lines);
+    const isWinner = isStepNode(child) && node.winnerId === child.id;
     lines.push(`    ${startId} --> ${result.entryId}`);
-    childExitIds.push(result.exitId);
-
-    // Mark winner
-    if (isStepNode(child) && node.winnerId === child.id) {
-      lines.push(`    ${result.exitId} -. winner .-> ${endId}`);
+    
+    if (isWinner) {
+      winnerExitId = result.exitId;
     }
+    childExitIds.push({ exitId: result.exitId, isWinner });
   }
 
-  // End node
-  lines.push(`    ${endId}((First))`);
-  for (const exitId of childExitIds) {
-    if (
-      !node.winnerId ||
-      !node.children.some((c) => isStepNode(c) && c.id === node.winnerId)
-    ) {
+  // End node - more distinctive
+  lines.push(`    ${endId}(("✓ First"))`);
+  
+  // Connect winner with thick line, others with dashed (cancelled)
+  for (const { exitId, isWinner } of childExitIds) {
+    if (isWinner && winnerExitId) {
+      lines.push(`    ${exitId} ==>|🏆 Winner| ${endId}`);
+    } else if (node.winnerId) {
+      // Non-winner: show as cancelled
+      lines.push(`    ${exitId} -. cancelled .-> ${endId}`);
+    } else {
+      // No winner determined, normal connection
       lines.push(`    ${exitId} --> ${endId}`);
     }
   }

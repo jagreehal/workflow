@@ -44,6 +44,7 @@
     "clean": "rm -rf dist lib",
     "prebuild": "pnpm clean",
     "prepare": "pnpm build",
+    "quality": "pnpm build:tsc && pnpm test && pnpm lint",
     "prepublishOnly": "pnpm build:tsc && pnpm run test && pnpm run lint",
     "changeset": "changeset",
     "version-packages": "changeset version",

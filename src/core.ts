@@ -3002,6 +3002,218 @@ export function mapErrorTry<T, E, F, G, C>(
   }
 }
 
+/**
+ * Transforms both the success value and error value of a Result simultaneously.
+ *
+ * ## When to Use
+ *
+ * Use `bimap()` when:
+ * - You need to transform both success and error in one operation
+ * - You're normalizing Results to a common format
+ * - You want symmetric transformation of both cases
+ * - You're building adapters between different Result types
+ *
+ * ## Why Use This Instead of `map` + `mapError`
+ *
+ * - **Single operation**: Transforms both cases in one call
+ * - **Clearer intent**: Shows you're handling both cases symmetrically
+ * - **Less code**: Avoids chaining map and mapError
+ *
+ * @param r - The Result to transform
+ * @param onOk - Function that transforms the success value
+ * @param onErr - Function that transforms the error value
+ * @returns A new Result with transformed value or transformed error
+ *
+ * @example
+ * ```typescript
+ * // Normalize to API response format
+ * const response = bimap(
+ *   fetchUser(id),
+ *   user => ({ status: 'success', data: user }),
+ *   error => ({ status: 'error', code: error })
+ * );
+ *
+ * // Transform types
+ * const stringified = bimap(
+ *   parseNumber(input),
+ *   n => `Value: ${n}`,
+ *   e => `Error: ${e}`
+ * );
+ *
+ * // Adapt between error types
+ * const adapted = bimap(
+ *   externalResult,
+ *   value => internalValue(value),
+ *   error => internalError(error)
+ * );
+ * ```
+ */
+export function bimap<T, U, E, F, C>(
+  r: Result<T, E, C>,
+  onOk: (value: T) => U,
+  onErr: (error: E) => F
+): Result<U, F, C> {
+  return r.ok ? ok(onOk(r.value)) : err(onErr(r.error), { cause: r.cause });
+}
+
+/**
+ * Recovers from an error by returning a new Result.
+ * Similar to neverthrow's `.orElse()`.
+ *
+ * ## When to Use
+ *
+ * Use `orElse()` when:
+ * - You want to recover from errors with fallback operations
+ * - The recovery might also fail (returns a Result)
+ * - You need to chain fallback strategies
+ * - You're implementing retry or fallback patterns
+ *
+ * ## Why Use This
+ *
+ * - **Fallback chains**: Try alternative operations on failure
+ * - **Error recovery**: Convert errors to success with fallback values
+ * - **Composable**: Can chain multiple orElse calls for cascading fallbacks
+ * - **Type-safe**: TypeScript tracks the error union through recovery
+ *
+ * @param r - The Result to potentially recover from
+ * @param fn - Function that takes the error and returns a new Result (may succeed or fail)
+ * @returns The original Result if successful, or the result of the recovery function
+ *
+ * @example
+ * ```typescript
+ * // Fallback to default user
+ * const user = orElse(
+ *   fetchUser(id),
+ *   error => error === 'NOT_FOUND' ? ok(defaultUser) : err(error)
+ * );
+ *
+ * // Try cache, then database, then fail
+ * const data = orElse(
+ *   orElse(
+ *     fetchFromCache(key),
+ *     () => fetchFromDatabase(key)
+ *   ),
+ *   () => err('DATA_UNAVAILABLE' as const)
+ * );
+ *
+ * // Convert specific errors to success
+ * const result = orElse(
+ *   riskyOperation(),
+ *   error => error.code === 'RETRY' ? ok(defaultValue) : err(error)
+ * );
+ * ```
+ */
+export function orElse<T, E, E2, C, C2>(
+  r: Result<T, E, C>,
+  fn: (error: E, cause?: C) => Result<T, E2, C2>
+): Result<T, E2, C2> {
+  return r.ok ? r : fn(r.error, r.cause);
+}
+
+/**
+ * Async version of orElse for recovering from errors with async operations.
+ *
+ * @param r - The Result or AsyncResult to potentially recover from
+ * @param fn - Async function that takes the error and returns a new Result
+ * @returns Promise of the original Result if successful, or the result of the recovery function
+ *
+ * @example
+ * ```typescript
+ * // Try primary API, fall back to secondary
+ * const data = await orElseAsync(
+ *   await fetchFromPrimaryApi(),
+ *   async (error) => {
+ *     if (error === 'UNAVAILABLE') {
+ *       return await fetchFromSecondaryApi();
+ *     }
+ *     return err(error);
+ *   }
+ * );
+ * ```
+ */
+export async function orElseAsync<T, E, E2, C, C2>(
+  r: Result<T, E, C> | Promise<Result<T, E, C>>,
+  fn: (error: E, cause?: C) => Result<T, E2, C2> | Promise<Result<T, E2, C2>>
+): Promise<Result<T, E2, C2>> {
+  const resolved = await r;
+  return resolved.ok ? resolved : fn(resolved.error, resolved.cause);
+}
+
+/**
+ * Recovers from an error by returning a plain value (not a Result).
+ * Useful when you want to provide a default value on error.
+ *
+ * ## When to Use
+ *
+ * Use `recover()` when:
+ * - You want to provide a fallback value on error
+ * - Recovery cannot fail (unlike orElse which returns a Result)
+ * - You're implementing default value patterns
+ * - You want to guarantee a successful Result
+ *
+ * ## Why Use This Instead of `orElse`
+ *
+ * - **Simpler**: Recovery function returns plain value, not Result
+ * - **Guaranteed success**: Always returns ok() after recovery
+ * - **Clearer intent**: Shows recovery cannot fail
+ *
+ * @param r - The Result to potentially recover from
+ * @param fn - Function that takes the error and returns a recovery value
+ * @returns The original Result if successful, or ok(recoveryValue) if error
+ *
+ * @example
+ * ```typescript
+ * // Provide default user on NOT_FOUND
+ * const user = recover(
+ *   fetchUser(id),
+ *   error => error === 'NOT_FOUND' ? defaultUser : guestUser
+ * );
+ *
+ * // Convert all errors to default
+ * const config = recover(
+ *   loadConfig(),
+ *   () => defaultConfig
+ * );
+ *
+ * // Recover with error-based defaults
+ * const value = recover(
+ *   parseNumber(input),
+ *   error => error === 'EMPTY' ? 0 : -1
+ * );
+ * ```
+ */
+export function recover<T, E, C>(
+  r: Result<T, E, C>,
+  fn: (error: E, cause?: C) => T
+): Result<T, never, never> {
+  return r.ok ? ok(r.value) : ok(fn(r.error, r.cause));
+}
+
+/**
+ * Async version of recover for recovering with async operations.
+ *
+ * @param r - The Result or AsyncResult to potentially recover from
+ * @param fn - Async function that takes the error and returns a recovery value
+ * @returns Promise of ok(value) - either original or recovered
+ *
+ * @example
+ * ```typescript
+ * // Recover by fetching default from API
+ * const user = await recoverAsync(
+ *   await fetchUser(id),
+ *   async (error) => await fetchDefaultUser()
+ * );
+ * ```
+ */
+export async function recoverAsync<T, E, C>(
+  r: Result<T, E, C> | Promise<Result<T, E, C>>,
+  fn: (error: E, cause?: C) => T | Promise<T>
+): Promise<Result<T, never, never>> {
+  const resolved = await r;
+  if (resolved.ok) return ok(resolved.value);
+  return ok(await fn(resolved.error, resolved.cause));
+}
+
 // =============================================================================
 // Batch Operations
 // =============================================================================

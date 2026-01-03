@@ -136,6 +136,11 @@ export {
   tapError,
   mapTry,
   mapErrorTry,
+  bimap,
+  orElse,
+  orElseAsync,
+  recover,
+  recoverAsync,
 
   // Batch
   type SettledError,

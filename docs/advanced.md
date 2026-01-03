@@ -232,3 +232,898 @@ const result = await run.strict<User, AppError>(
 ```
 
 Prefer `createWorkflow` for automatic error type inference.
+
+## Circuit Breaker
+
+Prevent cascading failures by tracking step failure rates and short-circuiting calls when a threshold is exceeded:
+
+```typescript
+import { 
+  createCircuitBreaker, 
+  isCircuitOpenError, 
+  circuitBreakerPresets,
+  ok,  // Import ok for Result-returning operations
+} from '@jagreehal/workflow';
+
+// Create a circuit breaker with custom config (name is required)
+const breaker = createCircuitBreaker('external-api', {
+  failureThreshold: 5,      // Open after 5 failures
+  resetTimeout: 30000,      // Try again after 30 seconds
+  halfOpenMax: 3,           // Allow 3 test requests in half-open state
+  windowSize: 60000,        // Count failures within this window (1 minute)
+});
+
+// Or use a preset
+const criticalBreaker = createCircuitBreaker('critical-service', circuitBreakerPresets.critical);
+const lenientBreaker = createCircuitBreaker('lenient-service', circuitBreakerPresets.lenient);
+
+// Option 1: execute() throws CircuitOpenError if circuit is open
+try {
+  const data = await breaker.execute(async () => {
+    return await fetchFromExternalApi();
+  });
+  console.log('Got data:', data);
+} catch (error) {
+  if (isCircuitOpenError(error)) {
+    console.log(`Circuit is open, retry after ${error.retryAfterMs}ms`);
+  } else {
+    console.log('Operation failed:', error);
+  }
+}
+
+// Option 2: executeResult() returns a Result instead of throwing
+const result = await breaker.executeResult(async () => {
+  // Your Result-returning operation
+  return ok(await fetchFromExternalApi());
+});
+
+if (!result.ok) {
+  if (isCircuitOpenError(result.error)) {
+    console.log('Circuit is open, try again later');
+  }
+}
+
+// Check circuit state (no arguments needed)
+const stats = breaker.getStats();
+console.log(stats.state);        // 'CLOSED' | 'OPEN' | 'HALF_OPEN'
+console.log(stats.failureCount);
+console.log(stats.successCount);
+console.log(stats.halfOpenSuccesses);
+```
+
+## Saga / Compensation Pattern
+
+Define compensating actions for steps that need rollback on downstream failures:
+
+```typescript
+import { createSagaWorkflow, isSagaCompensationError } from '@jagreehal/workflow';
+
+// Create saga with deps (like createWorkflow) - error types inferred automatically
+const checkoutSaga = createSagaWorkflow(
+  { reserveInventory, chargeCard, sendConfirmation },
+  { onEvent: (event) => console.log(event) }
+);
+
+const result = await checkoutSaga(async (saga, deps) => {
+  // Reserve inventory with compensation
+  const reservation = await saga.step(
+    () => deps.reserveInventory(items),
+    {
+      name: 'reserve-inventory',
+      compensate: (res) => releaseInventory(res.reservationId),
+    }
+  );
+
+  // Charge card with compensation
+  const payment = await saga.step(
+    () => deps.chargeCard(amount),
+    {
+      name: 'charge-card',
+      compensate: (p) => refundPayment(p.transactionId),
+    }
+  );
+
+  // If sendConfirmation fails, compensations run in reverse order:
+  // 1. refundPayment(payment.transactionId)
+  // 2. releaseInventory(reservation.reservationId)
+  await saga.step(
+    () => deps.sendConfirmation(email),
+    { name: 'send-confirmation' }
+  );
+
+  return { reservation, payment };
+});
+
+// Check for compensation errors
+if (!result.ok && isSagaCompensationError(result.error)) {
+  console.log('Saga failed, compensations may have partially succeeded');
+  console.log(result.error.compensationErrors);
+}
+```
+
+### Low-level runSaga
+
+For explicit error typing without deps-based inference:
+
+```typescript
+import { runSaga } from '@jagreehal/workflow';
+
+const result = await runSaga<CheckoutResult, CheckoutError>(async (saga) => {
+  const reservation = await saga.step(
+    () => reserveInventory(items),
+    { compensate: (res) => releaseInventory(res.id) }
+  );
+
+  // tryStep for catching throws
+  const payment = await saga.tryStep(
+    () => externalPaymentApi.charge(amount),
+    {
+      error: 'PAYMENT_FAILED' as const,
+      compensate: (p) => externalPaymentApi.refund(p.txId),
+    }
+  );
+
+  return { reservation, payment };
+});
+```
+
+## Rate Limiting / Concurrency Control
+
+Control throughput for steps that hit rate-limited APIs:
+
+```typescript
+import { 
+  createRateLimiter, 
+  createConcurrencyLimiter,
+  createCombinedLimiter,
+  rateLimiterPresets,
+} from '@jagreehal/workflow';
+
+// Token bucket rate limiter (requires name and config)
+const rateLimiter = createRateLimiter('api-calls', {
+  maxPerSecond: 10,        // Maximum operations per second
+  burstCapacity: 20,       // Allow brief spikes (default: maxPerSecond * 2)
+  strategy: 'wait',        // 'wait' (default) or 'reject'
+});
+
+// Concurrency limiter
+const concurrencyLimiter = createConcurrencyLimiter('db-pool', {
+  maxConcurrent: 5,        // Max 5 concurrent operations
+  maxQueueSize: 100,       // Queue up to 100 waiting requests
+  strategy: 'queue',       // 'queue' (default) or 'reject'
+});
+
+// Use presets for common scenarios
+const apiLimiter = createRateLimiter('external-api', rateLimiterPresets.api);
+// rateLimiterPresets.api: { maxPerSecond: 10, burstCapacity: 20, strategy: 'wait' }
+// rateLimiterPresets.external: { maxPerSecond: 5, burstCapacity: 10, strategy: 'wait' }
+// rateLimiterPresets.database: for ConcurrencyLimiter - { maxConcurrent: 10, strategy: 'queue', maxQueueSize: 100 }
+
+// Wrap operations with execute() method
+const data = await rateLimiter.execute(async () => {
+  return await callExternalApi();
+});
+
+// For Result-returning operations
+const result = await rateLimiter.executeResult(async () => {
+  return ok(await callExternalApi());
+});
+
+// Use with batch operations
+const results = await concurrencyLimiter.executeAll(
+  ids.map(id => async () => fetchItem(id))
+);
+
+// Combined limiter (both rate and concurrency)
+const combined = createCombinedLimiter('api', {
+  rate: { maxPerSecond: 10 },
+  concurrency: { maxConcurrent: 3 },
+});
+
+const data = await combined.execute(async () => callApi());
+
+// Get limiter statistics
+const stats = rateLimiter.getStats();
+console.log(stats.availableTokens);  // Current available tokens
+console.log(stats.waitingCount);     // Requests waiting for tokens
+```
+
+## Workflow Versioning and Migration
+
+Handle schema changes when resuming workflows persisted with older step shapes:
+
+```typescript
+import { 
+  createVersionedStateLoader,
+  createVersionedState,
+  parseVersionedState,
+  stringifyVersionedState,
+  migrateState,
+  createKeyRenameMigration,
+  createKeyRemoveMigration,
+  createValueTransformMigration,
+  composeMigrations,
+} from '@jagreehal/workflow';
+
+// Define migrations from each version to the next
+// Key is source version, migration transforms to version + 1
+const migrations = {
+  // Migrate from v1 to v2: rename keys
+  1: createKeyRenameMigration({ 
+    'user:fetch': 'user:load',
+    'order:create': 'order:submit',
+  }),
+  
+  // Migrate from v2 to v3: multiple transformations
+  2: composeMigrations([
+    createKeyRemoveMigration(['deprecated:step']),
+    createValueTransformMigration({
+      'user:load': (entry) => ({
+        ...entry,
+        result: entry.result.ok 
+          ? { ok: true, value: { ...entry.result.value, newField: 'default' } }
+          : entry.result,
+      }),
+    }),
+  ]),
+};
+
+// Create a versioned state loader
+const loader = createVersionedStateLoader({
+  version: 3,               // Current workflow version
+  migrations,
+  strictVersioning: true,   // Fail if state is from newer version
+});
+
+// Load state from storage and parse it
+const json = await db.loadWorkflowState(runId);
+const versionedState = parseVersionedState(json);
+
+// Migrate to current version
+const result = await loader(versionedState);
+if (!result.ok) {
+  // Handle migration error or version incompatibility
+  console.error(result.error);
+}
+
+// Use migrated state with workflow
+const workflow = createWorkflow(deps, { resumeState: result.value });
+
+// When saving state, create versioned state
+import { createStepCollector } from '@jagreehal/workflow';
+
+const collector = createStepCollector();
+// ... run workflow with collector ...
+
+const versionedState = createVersionedState(collector.getState(), 3);
+const serialized = stringifyVersionedState(versionedState);
+await db.saveWorkflowState(runId, serialized);
+```
+
+## Conditional Step Execution
+
+Declarative guards for steps that should only run under certain conditions:
+
+```typescript
+import { when, unless, whenOr, unlessOr, createConditionalHelpers } from '@jagreehal/workflow';
+
+const result = await workflow(async (step) => {
+  const user = await step(() => fetchUser(id), { key: 'user' });
+
+  // Only runs if condition is true, returns undefined if skipped
+  const premium = await when(
+    user.isPremium,
+    () => step(() => fetchPremiumData(user.id), { key: 'premium' }),
+    { name: 'check-premium', reason: 'User is not premium' }
+  );
+
+  // Skips if condition is true, returns undefined if skipped
+  const trial = await unless(
+    user.isPremium,
+    () => step(() => fetchTrialLimits(user.id), { key: 'trial' }),
+    { name: 'check-trial', reason: 'User is premium' }
+  );
+
+  // With default value instead of undefined
+  const limits = await whenOr(
+    user.isPremium,
+    () => step(() => fetchPremiumLimits(user.id), { key: 'premium-limits' }),
+    { maxRequests: 100, maxStorage: 1000 }, // default for non-premium
+    { name: 'check-premium-limits', reason: 'Using default limits' }
+  );
+
+  return { user, premium, trial, limits };
+});
+```
+
+### With Event Emission
+
+Use `createConditionalHelpers` to emit `step_skipped` events for visualization and debugging:
+
+```typescript
+const result = await run(async (step) => {
+  const ctx = { workflowId: 'my-workflow', onEvent: console.log };
+  const { when, whenOr } = createConditionalHelpers(ctx);
+
+  const user = await step(fetchUser(id));
+
+  // Emits step_skipped event when condition is false
+  const premium = await when(
+    user.isPremium,
+    () => step(() => fetchPremiumData(user.id)),
+    { name: 'premium-data', reason: 'User is not premium' }
+  );
+
+  return { user, premium };
+}, { onEvent, workflowId });
+```
+
+## Webhook / Event Trigger Adapters
+
+Expose workflows as HTTP endpoints or event consumers:
+
+```typescript
+import { 
+  createWebhookHandler,
+  createSimpleHandler,
+  createResultMapper,
+  createExpressHandler,
+  validationError,
+  requireFields,
+} from '@jagreehal/workflow';
+
+// Create a webhook handler for a workflow
+const handler = createWebhookHandler(
+  checkoutWorkflow,
+  async (step, deps, input: CheckoutInput) => {
+    const charge = await step(() => deps.chargeCard(input.amount));
+    await step(() => deps.sendEmail(input.email, charge.receiptUrl));
+    return { chargeId: charge.id };
+  },
+  {
+    validateInput: (req) => {
+      const validation = requireFields(['amount', 'email'])(req.body);
+      if (!validation.ok) return validation;
+      return ok({ amount: req.body.amount, email: req.body.email });
+    },
+    mapResult: createResultMapper([
+      { error: 'CARD_DECLINED', status: 402, message: 'Payment failed' },
+      { error: 'INVALID_EMAIL', status: 400, message: 'Invalid email address' },
+    ]),
+  }
+);
+
+// Use with Express
+import express from 'express';
+const app = express();
+app.post('/checkout', createExpressHandler(handler));
+
+// Or manually
+app.post('/checkout', async (req, res) => {
+  const response = await handler({
+    method: req.method,
+    path: req.path,
+    headers: req.headers,
+    body: req.body,
+    query: req.query,
+    params: req.params,
+  });
+  res.status(response.status).json(response.body);
+});
+```
+
+### Event Triggers (for message queues)
+
+```typescript
+import { createEventHandler } from '@jagreehal/workflow';
+
+const handler = createEventHandler(
+  checkoutWorkflow,
+  async (step, deps, payload: CheckoutPayload) => {
+    const charge = await step(() => deps.chargeCard(payload.amount));
+    return { chargeId: charge.id };
+  },
+  {
+    validatePayload: (event) => {
+      if (!event.payload.amount) {
+        return err(validationError('Missing amount'));
+      }
+      return ok(event.payload);
+    },
+    mapResult: (result) => ({
+      success: result.ok,
+      ack: result.ok || !isRetryableError(result.error),
+      error: result.ok ? undefined : { type: String(result.error) },
+    }),
+  }
+);
+
+// Use with SQS, RabbitMQ, etc.
+queue.consume(async (message) => {
+  const result = await handler({
+    id: message.id,
+    type: message.type,
+    payload: message.body,
+  });
+  if (result.ack) await message.ack();
+  else await message.nack();
+});
+```
+
+## Policy-Driven Step Middleware
+
+Reusable bundles of `StepOptions` (retry, timeout, cache keys) that can be composed and applied per-workflow or per-step:
+
+```typescript
+import { 
+  mergePolicies,
+  createPolicyApplier,
+  withPolicy,
+  withPolicies,
+  retryPolicies,
+  timeoutPolicies,
+  servicePolicies,
+  createPolicyRegistry,
+  stepOptions,
+} from '@jagreehal/workflow';
+
+// Use pre-built service policies
+const user = await step(
+  () => fetchUser(id),
+  withPolicy(servicePolicies.httpApi, { name: 'fetch-user' })
+);
+
+// Combine multiple policies
+const data = await step(
+  () => fetchData(),
+  withPolicies([timeoutPolicies.api, retryPolicies.standard], 'fetch-data')
+);
+
+// Create a policy applier for consistent defaults
+const applyPolicy = createPolicyApplier(
+  timeoutPolicies.api,
+  retryPolicies.transient
+);
+
+const result = await step(
+  () => callApi(),
+  applyPolicy({ name: 'api-call', key: 'cache:api' })
+);
+
+// Use the fluent builder API
+const options = stepOptions()
+  .name('fetch-user')
+  .key('user:123')
+  .timeout(5000)
+  .retries(3)
+  .build();
+
+// Create a policy registry for organization-wide policies
+const registry = createPolicyRegistry();
+registry.register('api', servicePolicies.httpApi);
+registry.register('db', servicePolicies.database);
+registry.register('cache', servicePolicies.cache);
+
+const user = await step(
+  () => fetchUser(id),
+  registry.apply('api', { name: 'fetch-user' })
+);
+```
+
+### Available Presets
+
+```typescript
+// Retry policies
+retryPolicies.none           // No retry
+retryPolicies.transient      // 3 attempts, fast backoff
+retryPolicies.standard       // 3 attempts, moderate backoff
+retryPolicies.aggressive     // 5 attempts, longer backoff
+retryPolicies.fixed(3, 1000) // 3 attempts, 1s fixed delay
+retryPolicies.linear(3, 100) // 3 attempts, linear backoff
+
+// Timeout policies
+timeoutPolicies.fast         // 1 second
+timeoutPolicies.api          // 5 seconds
+timeoutPolicies.extended     // 30 seconds
+timeoutPolicies.long         // 2 minutes
+timeoutPolicies.ms(3000)     // Custom milliseconds
+
+// Service policies (combined retry + timeout)
+servicePolicies.httpApi      // 5s timeout, 3 retries
+servicePolicies.database     // 30s timeout, 2 retries
+servicePolicies.cache        // 1s timeout, no retry
+servicePolicies.messageQueue // 30s timeout, 5 retries
+servicePolicies.fileSystem   // 2min timeout, 3 retries
+servicePolicies.rateLimited  // 10s timeout, 5 linear retries
+```
+
+## Pluggable Persistence Adapters
+
+First-class adapters for `StepCache` and `ResumeState` with JSON-safe serialization:
+
+```typescript
+import { 
+  createMemoryCache,
+  createFileCache,
+  createKVCache,
+  createStatePersistence,
+  createHydratingCache,
+  stringifyState,
+  parseState,
+} from '@jagreehal/workflow';
+
+// In-memory cache with TTL and LRU eviction
+const cache = createMemoryCache({ 
+  maxSize: 1000,    // Max entries
+  ttl: 60000,       // 1 minute TTL
+});
+
+const workflow = createWorkflow(deps, { cache });
+
+// File-based persistence
+import * as fs from 'fs/promises';
+
+const fileCache = createFileCache({
+  directory: './workflow-cache',
+  fs: {
+    readFile: (path) => fs.readFile(path, 'utf-8'),
+    writeFile: (path, data) => fs.writeFile(path, data, 'utf-8'),
+    unlink: fs.unlink,
+    exists: async (path) => fs.access(path).then(() => true).catch(() => false),
+    readdir: fs.readdir,
+    mkdir: fs.mkdir,
+  },
+});
+
+await fileCache.init();
+
+// Redis/DynamoDB adapter
+const kvCache = createKVCache({
+  store: {
+    get: (key) => redis.get(key),
+    set: (key, value, opts) => redis.set(key, value, { EX: opts?.ttl }),
+    delete: (key) => redis.del(key).then(n => n > 0),
+    exists: (key) => redis.exists(key).then(n => n > 0),
+    keys: (pattern) => redis.keys(pattern),
+  },
+  prefix: 'myapp:workflow:',
+  ttl: 3600, // 1 hour
+});
+
+// State persistence for workflow resumption
+const persistence = createStatePersistence(kvStore, 'workflow:state:');
+
+await persistence.save('run-123', resumeState, { userId: 'user-1' });
+const loaded = await persistence.load('run-123');
+const allRuns = await persistence.list();
+
+// Hydrating cache (loads from persistent storage on first access)
+const hydratingCache = createHydratingCache(
+  createMemoryCache(),
+  persistence,
+  'run-123'
+);
+await hydratingCache.hydrate();
+```
+
+### JSON-safe Serialization
+
+```typescript
+import { 
+  serializeResult,
+  deserializeResult,
+  serializeState,
+  deserializeState,
+  stringifyState,
+  parseState,
+} from '@jagreehal/workflow';
+
+// Serialize Results with Error causes preserved
+const serialized = serializeResult(result);
+const restored = deserializeResult(serialized);
+
+// Serialize entire workflow state
+const json = stringifyState(resumeState, { userId: 'user-1' });
+const state = parseState(json);
+```
+
+## Devtools
+
+Developer tools for workflow debugging, visualization, and analysis:
+
+```typescript
+import { 
+  createDevtools,
+  renderDiff,
+  createConsoleLogger,
+  quickVisualize,
+} from '@jagreehal/workflow';
+
+// Create devtools instance
+const devtools = createDevtools({
+  workflowName: 'checkout',
+  logEvents: true,
+  maxHistory: 10,
+});
+
+// Use with workflow
+const workflow = createWorkflow(deps, {
+  onEvent: devtools.handleEvent,
+});
+
+await workflow(async (step) => {
+  const user = await step(() => fetchUser(id), { name: 'fetch-user' });
+  const charge = await step(() => chargeCard(100), { name: 'charge-card' });
+  return { user, charge };
+});
+
+// Render visualizations
+console.log(devtools.render());           // ASCII visualization
+console.log(devtools.renderMermaid());    // Mermaid diagram
+console.log(devtools.renderTimeline());   // Timeline view
+
+// Get timeline data
+const timeline = devtools.getTimeline();
+// [{ name: 'fetch-user', startMs: 0, endMs: 50, status: 'success' }, ...]
+
+// Compare runs
+const diff = devtools.diffWithPrevious();
+if (diff) {
+  console.log(renderDiff(diff));
+}
+
+// Export/import runs
+const json = devtools.exportRun();
+devtools.importRun(json);
+
+// Simple console logging
+const workflow2 = createWorkflow(deps, {
+  onEvent: createConsoleLogger({ prefix: '[checkout]', colors: true }),
+});
+```
+
+### Timeline Output Example
+
+```
+Timeline:
+────────────────────────────────────────────────────────────────
+fetch-user           |██████                                  | 50ms
+charge-card          |      ████████████                      | 120ms
+send-email           |                  ████                  | 30ms
+────────────────────────────────────────────────────────────────
+```
+
+## HITL Orchestration Helpers
+
+Production-ready helpers for human-in-the-loop approval workflows:
+
+```typescript
+import { 
+  createHITLOrchestrator,
+  createMemoryApprovalStore,
+  createMemoryWorkflowStateStore,
+  createApprovalWebhookHandler,
+  createApprovalChecker,
+} from '@jagreehal/workflow';
+
+// Create orchestrator with stores
+const orchestrator = createHITLOrchestrator({
+  approvalStore: createMemoryApprovalStore(),
+  workflowStateStore: createMemoryWorkflowStateStore(),
+  defaultExpirationMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+});
+
+// Execute workflow that may pause for approval
+// IMPORTANT: The factory must pass onEvent to createWorkflow for HITL tracking!
+const result = await orchestrator.execute(
+  'order-approval',
+  ({ resumeState, onEvent }) => createWorkflow(deps, { resumeState, onEvent }),
+  async (step, deps, input) => {
+    const order = await step(() => deps.createOrder(input));
+    const approval = await step(
+      () => deps.requireApproval(order.id),
+      { key: `approval:${order.id}` }
+    );
+    await step(() => deps.processOrder(order.id));
+    return { orderId: order.id };
+  },
+  { items: [...], total: 500 }
+);
+
+if (result.status === 'paused') {
+  console.log(`Workflow paused, waiting for: ${result.pendingApprovals}`);
+  console.log(`Run ID: ${result.runId}`);
+}
+
+// Grant approval (with optional auto-resume)
+const { resumedWorkflows } = await orchestrator.grantApproval(
+  `approval:${orderId}`,
+  { approvedBy: 'manager@example.com' },
+  { autoResume: true }
+);
+
+// Or poll for approval
+const status = await orchestrator.pollApproval(`approval:${orderId}`, {
+  intervalMs: 1000,
+  timeoutMs: 60000,
+});
+
+// Resume manually
+const resumed = await orchestrator.resume(
+  runId,
+  (resumeState) => createWorkflow(deps, { resumeState }),
+  workflowFn
+);
+```
+
+### Webhook Handler for Approvals
+
+```typescript
+import { createApprovalWebhookHandler } from '@jagreehal/workflow';
+import express from 'express';
+
+const handleApproval = createApprovalWebhookHandler(approvalStore);
+
+const app = express();
+app.post('/api/approvals', async (req, res) => {
+  const result = await handleApproval({
+    key: req.body.key,
+    action: req.body.action,  // 'approve' | 'reject' | 'cancel'
+    value: req.body.value,
+    reason: req.body.reason,
+    actorId: req.user.id,
+  });
+  res.json(result);
+});
+```
+
+## Deterministic Workflow Testing Harness
+
+Test workflows with scripted step outcomes:
+
+```typescript
+import { 
+  createWorkflowHarness,
+  createMockFn,
+  createTestClock,
+  createSnapshot,
+  compareSnapshots,
+  okOutcome,
+  errOutcome,
+} from '@jagreehal/workflow';
+
+// Create test harness
+const harness = createWorkflowHarness(
+  { fetchUser, chargeCard },
+  { clock: createTestClock().now }
+);
+
+// Script step outcomes
+harness.script([
+  okOutcome({ id: '1', name: 'Alice' }),
+  okOutcome({ transactionId: 'tx_123' }),
+]);
+
+// Or script specific steps by name
+harness.scriptStep('fetch-user', okOutcome({ id: '1', name: 'Alice' }));
+harness.scriptStep('charge-card', errOutcome('CARD_DECLINED'));
+
+// Run workflow
+const result = await harness.run(async (step, { fetchUser, chargeCard }) => {
+  const user = await step(() => fetchUser('1'), 'fetch-user');
+  const charge = await step(() => chargeCard(100), 'charge-card');
+  return { user, charge };
+});
+
+// Assert results
+expect(result.ok).toBe(false);
+expect(harness.assertSteps(['fetch-user', 'charge-card']).passed).toBe(true);
+expect(harness.assertStepCalled('fetch-user').passed).toBe(true);
+expect(harness.assertStepNotCalled('refund').passed).toBe(true);
+
+// Get invocation details
+const invocations = harness.getInvocations();
+console.log(invocations[0].name);      // 'fetch-user'
+console.log(invocations[0].durationMs); // 0 (deterministic clock)
+console.log(invocations[0].result);     // { ok: true, value: { id: '1', name: 'Alice' } }
+
+// Reset for next test
+harness.reset();
+```
+
+### Mock Functions
+
+```typescript
+import { createMockFn, ok, err } from '@jagreehal/workflow';
+
+const fetchUser = createMockFn<User, 'NOT_FOUND'>();
+
+// Set default return
+fetchUser.returns(ok({ id: '1', name: 'Alice' }));
+
+// Or queue return values
+fetchUser.returnsOnce(ok({ id: '1', name: 'Alice' }));
+fetchUser.returnsOnce(err('NOT_FOUND'));
+
+// Check calls
+console.log(fetchUser.getCallCount());  // 2
+console.log(fetchUser.getCalls());      // [[arg1], [arg2]]
+
+fetchUser.reset();
+```
+
+### Snapshot Testing
+
+```typescript
+import { createSnapshot, compareSnapshots } from '@jagreehal/workflow';
+
+// Create snapshot from a run (events are optional, from external sources)
+const snapshot1 = createSnapshot(
+  harness.getInvocations(),
+  result
+);
+
+// Run again and compare
+harness.reset();
+harness.script([...newOutcomes]); // script() resets state automatically
+const result2 = await harness.run(workflowFn);
+const snapshot2 = createSnapshot(harness.getInvocations(), result2);
+
+const { equal, differences } = compareSnapshots(snapshot1, snapshot2);
+if (!equal) {
+  console.log('Differences:', differences);
+}
+```
+
+## OpenTelemetry Integration (Autotel)
+
+First-class OpenTelemetry metrics from the event stream:
+
+```typescript
+import { createAutotelAdapter, createAutotelEventHandler, withAutotelTracing } from '@jagreehal/workflow';
+
+// Create an adapter that tracks metrics
+const autotel = createAutotelAdapter({
+  serviceName: 'checkout-service',
+  createStepSpans: true,        // Create spans for each step
+  recordMetrics: true,          // Record step metrics
+  recordRetryEvents: true,      // Record retry events
+  markErrorsOnSpan: true,       // Mark errors on spans
+  defaultAttributes: {          // Custom attributes for all spans
+    environment: 'production',
+  },
+});
+
+// Use adapter's handleEvent directly with workflow
+const workflow = createWorkflow(deps, {
+  onEvent: autotel.handleEvent,
+});
+
+// Access collected metrics
+const metrics = autotel.getMetrics();
+console.log(metrics.stepDurations);  // Array of { name, durationMs, success }
+console.log(metrics.retryCount);     // Total retry count
+console.log(metrics.errorCount);     // Total error count
+console.log(metrics.cacheHits);      // Cache hit count
+console.log(metrics.cacheMisses);    // Cache miss count
+
+// Or use the simpler event handler for debug logging
+const workflow2 = createWorkflow(deps, {
+  onEvent: createAutotelEventHandler({ 
+    serviceName: 'checkout',
+    includeStepDetails: true,
+  }),
+});
+// Set AUTOTEL_DEBUG=true to see console output
+
+// Wrap with autotel tracing for actual OpenTelemetry spans
+import { trace } from 'autotel';
+
+const traced = withAutotelTracing(trace, { serviceName: 'checkout' });
+
+const result = await traced('process-order', async () => {
+  return workflow(async (step) => {
+    // ... workflow logic
+  });
+}, { orderId: '123' }); // Optional attributes
+```

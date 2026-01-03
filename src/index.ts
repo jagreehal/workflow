@@ -189,3 +189,362 @@ export {
   getPendingApprovals,
   createHITLCollector,
 } from "./workflow";
+
+// =============================================================================
+// Conditional - when/unless helpers
+// =============================================================================
+
+export {
+  // Types
+  type ConditionalOptions,
+  type ConditionalContext,
+
+  // Functions
+  when,
+  unless,
+  whenOr,
+  unlessOr,
+  createConditionalHelpers,
+} from "./conditional";
+
+// =============================================================================
+// Circuit Breaker
+// =============================================================================
+
+export {
+  // Types
+  type CircuitState,
+  type CircuitBreakerConfig,
+  type CircuitBreakerStats,
+  type CircuitBreaker,
+
+  // Classes and functions
+  CircuitOpenError,
+  isCircuitOpenError,
+  createCircuitBreaker,
+  circuitBreakerPresets,
+} from "./circuit-breaker";
+
+// =============================================================================
+// Saga / Compensation Pattern
+// =============================================================================
+
+export {
+  // Types
+  type CompensationAction,
+  type SagaStepOptions,
+  type SagaCompensationError,
+  type SagaContext,
+  type SagaEvent,
+  type SagaWorkflowOptions,
+  type SagaResult,
+
+  // Functions
+  isSagaCompensationError,
+  createSagaWorkflow,
+  runSaga,
+} from "./saga";
+
+// =============================================================================
+// Rate Limiting / Concurrency Control
+// =============================================================================
+
+export {
+  // Types
+  type RateLimiterConfig,
+  type ConcurrencyLimiterConfig,
+  type RateLimitExceededError,
+  type QueueFullError,
+  type RateLimiterStats,
+  type ConcurrencyLimiterStats,
+  type RateLimiter,
+  type ConcurrencyLimiter,
+  type CombinedLimiterConfig,
+
+  // Functions
+  isRateLimitExceededError,
+  isQueueFullError,
+  createRateLimiter,
+  createConcurrencyLimiter,
+  createCombinedLimiter,
+  rateLimiterPresets,
+} from "./rate-limiter";
+
+// =============================================================================
+// Workflow Versioning and Migration
+// =============================================================================
+
+export {
+  // Types
+  type Version,
+  type MigrationFn,
+  type Migrations,
+  type VersionedState,
+  type VersionedWorkflowConfig,
+  type MigrationError,
+  type VersionIncompatibleError,
+
+  // Functions
+  isMigrationError,
+  isVersionIncompatibleError,
+  migrateState,
+  createVersionedStateLoader,
+  createVersionedState,
+  parseVersionedState,
+  stringifyVersionedState,
+
+  // Migration helpers
+  createKeyRenameMigration,
+  createKeyRemoveMigration,
+  createValueTransformMigration,
+  composeMigrations,
+} from "./versioning";
+
+// =============================================================================
+// Autotel Integration
+// =============================================================================
+
+export {
+  // Types
+  type AutotelAdapterConfig,
+  type AutotelMetrics,
+  type AutotelAdapter,
+  type AutotelTraceFn,
+
+  // Functions
+  createAutotelAdapter,
+  createAutotelEventHandler,
+  withAutotelTracing,
+} from "./autotel";
+
+// =============================================================================
+// Webhook / Event Trigger Adapters
+// =============================================================================
+
+export {
+  // Request/Response Types
+  type WebhookRequest,
+  type WebhookResponse,
+  type ErrorResponseBody,
+
+  // Validation Types
+  type ValidationResult,
+  type ValidationError,
+  isValidationError,
+
+  // Handler Types
+  type WebhookHandlerConfig,
+  type WebhookHandler,
+  type SimpleHandlerConfig,
+
+  // Error Mapping
+  type ErrorMapping,
+
+  // Event Trigger Types
+  type EventMessage,
+  type EventProcessingResult,
+  type EventTriggerConfig,
+  type EventHandler,
+
+  // Framework Adapter Types
+  type ExpressLikeRequest,
+  type ExpressLikeResponse,
+
+  // Factory Functions
+  createWebhookHandler,
+  createSimpleHandler,
+  createEventHandler,
+  createResultMapper,
+
+  // Default Mappers
+  defaultValidationErrorMapper,
+  defaultUnexpectedErrorMapper,
+
+  // Framework Adapters
+  toWebhookRequest,
+  sendWebhookResponse,
+  createExpressHandler,
+
+  // Validation Helpers
+  validationError,
+  requireFields,
+  composeValidators,
+} from "./webhook";
+
+// =============================================================================
+// Policy-Driven Step Middleware
+// =============================================================================
+
+export {
+  // Types
+  type Policy,
+  type PolicyFactory,
+  type NamedPolicy,
+  type WithPoliciesOptions,
+  type PolicyRegistry,
+  type StepOptionsBuilder,
+
+  // Policy Composition
+  mergePolicies,
+  createPolicyApplier,
+  createPolicyBundle,
+
+  // Retry Policies
+  retryPolicy,
+  retryPolicies,
+
+  // Timeout Policies
+  timeoutPolicy,
+  timeoutPolicies,
+
+  // Combined Policies
+  servicePolicies,
+
+  // Policy Decorators
+  withPolicy,
+  withPolicies,
+
+  // Conditional Policies
+  conditionalPolicy,
+  envPolicy,
+
+  // Policy Registry
+  createPolicyRegistry,
+
+  // Fluent Builder
+  stepOptions,
+} from "./policies";
+
+// =============================================================================
+// Pluggable Persistence Adapters
+// =============================================================================
+
+export {
+  // Serialization Types
+  type SerializedResult,
+  type SerializedCause,
+  type SerializedMeta,
+  type SerializedEntry,
+  type SerializedState,
+
+  // Serialization Helpers
+  serializeCause,
+  deserializeCause,
+  serializeResult,
+  deserializeResult,
+  serializeMeta,
+  deserializeMeta,
+  serializeEntry,
+  deserializeEntry,
+  serializeState,
+  deserializeState,
+  stringifyState,
+  parseState,
+
+  // In-Memory Adapter
+  type MemoryCacheOptions,
+  createMemoryCache,
+
+  // File System Adapter
+  type FileCacheOptions,
+  type FileSystemInterface,
+  createFileCache,
+
+  // Key-Value Store Adapter
+  type KeyValueStore,
+  type KVCacheOptions,
+  createKVCache,
+
+  // State Persistence
+  type StatePersistence,
+  createStatePersistence,
+
+  // Hydrating Cache
+  createHydratingCache,
+} from "./persistence";
+
+// =============================================================================
+// Devtools
+// =============================================================================
+
+export {
+  // Types
+  type WorkflowRun,
+  type RunDiff,
+  type StepDiff,
+  type TimelineEntry,
+  type DevtoolsOptions,
+  type Devtools,
+
+  // Factory
+  createDevtools,
+
+  // Helpers
+  renderDiff,
+  quickVisualize,
+  createConsoleLogger,
+} from "./devtools";
+
+// =============================================================================
+// HITL Orchestration Helpers
+// =============================================================================
+
+export {
+  // Types
+  type ApprovalStatus,
+  type ApprovalStore,
+  type SavedWorkflowState,
+  type WorkflowStateStore,
+  type HITLOrchestratorOptions,
+  type HITLExecutionResult,
+  type PollerOptions,
+  type HITLOrchestrator,
+  type HITLWorkflowFactoryOptions,
+  type ApprovalWebhookRequest,
+  type ApprovalWebhookResponse,
+
+  // In-Memory Stores
+  createMemoryApprovalStore,
+  createMemoryWorkflowStateStore,
+
+  // Orchestrator
+  createHITLOrchestrator,
+
+  // Webhook Handlers
+  createApprovalWebhookHandler,
+
+  // Approval Checker
+  createApprovalChecker,
+} from "./hitl";
+
+// =============================================================================
+// Deterministic Workflow Testing Harness
+// =============================================================================
+
+export {
+  // Types
+  type ScriptedOutcome,
+  type StepInvocation,
+  type AssertionResult,
+  type TestHarnessOptions,
+  type MockStep,
+  type WorkflowHarness,
+  type MockFunction,
+  type WorkflowSnapshot,
+
+  // Test Harness
+  createWorkflowHarness,
+
+  // Mock Factories
+  createMockFn,
+
+  // Snapshot Testing
+  createSnapshot,
+  compareSnapshots,
+
+  // Test Utilities
+  createTestClock,
+  okOutcome,
+  errOutcome,
+  throwOutcome,
+} from "./testing";

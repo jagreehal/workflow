@@ -193,3 +193,260 @@ ExtractCause<Result>                // Extract cause type from Result
 ```typescript
 UnwrapError<E, C>                   // Error thrown by unwrap()
 ```
+
+## Circuit Breaker
+
+```typescript
+createCircuitBreaker(name, config)  // Create circuit breaker instance
+isCircuitOpenError(error)           // Check if error is circuit open
+circuitBreakerPresets.critical      // Preset configurations
+circuitBreakerPresets.lenient
+```
+
+### Types
+
+```typescript
+CircuitState                        // 'CLOSED' | 'OPEN' | 'HALF_OPEN'
+CircuitBreakerConfig                // Configuration options
+CircuitBreakerStats                 // Runtime statistics
+CircuitBreaker                      // Circuit breaker interface
+CircuitOpenError                    // Error when circuit is open
+```
+
+## Saga / Compensation
+
+```typescript
+createSagaWorkflow(deps, options)   // Create saga with auto-inferred errors
+runSaga(fn, options)                // Low-level saga execution
+isSagaCompensationError(error)      // Check for compensation failure
+```
+
+### Types
+
+```typescript
+SagaContext<E>                      // Context with step() and tryStep()
+SagaStepOptions<T>                  // Step options with compensate
+SagaCompensationError               // Error with compensation details
+SagaEvent                           // Saga lifecycle events
+SagaResult<T, E>                    // Result type for sagas
+CompensationAction<T>               // Compensation function type
+```
+
+## Rate Limiting
+
+```typescript
+createRateLimiter(name, config)     // Token bucket rate limiter
+createConcurrencyLimiter(name, cfg) // Concurrent execution limiter
+createCombinedLimiter(name, config) // Rate + concurrency combined
+rateLimiterPresets.api              // Preset configurations
+isRateLimitExceededError(error)     // Check if rate limited
+isQueueFullError(error)             // Check if queue full
+```
+
+### Types
+
+```typescript
+RateLimiterConfig                   // Rate limiter configuration
+ConcurrencyLimiterConfig            // Concurrency limiter config
+RateLimiter                         // Rate limiter interface
+ConcurrencyLimiter                  // Concurrency limiter interface
+RateLimitExceededError              // Error when rate exceeded
+QueueFullError                      // Error when queue full
+```
+
+## Versioning
+
+```typescript
+migrateState(state, target, migrations)    // Apply migrations
+createVersionedStateLoader(config)         // Create loader with migrations
+createVersionedState(state, version)       // Wrap state with version
+parseVersionedState(json)                  // Parse from JSON
+stringifyVersionedState(state)             // Serialize to JSON
+createKeyRenameMigration(renames)          // Migration helper
+createKeyRemoveMigration(keys)             // Migration helper
+createValueTransformMigration(transforms)  // Migration helper
+composeMigrations(migrations)              // Combine migrations
+```
+
+### Types
+
+```typescript
+Version                             // Version number type
+VersionedState                      // State with version
+MigrationFn                         // Migration function type
+Migrations                          // Migration map type
+MigrationError                      // Error during migration
+VersionIncompatibleError            // Version mismatch error
+```
+
+## Conditional Execution
+
+```typescript
+when(condition, operation, opts, ctx)      // Run if true
+unless(condition, operation, opts, ctx)    // Run if false
+whenOr(cond, op, default, opts, ctx)       // Run if true, else default
+unlessOr(cond, op, default, opts, ctx)     // Run if false, else default
+createConditionalHelpers(ctx)              // Factory for bound helpers
+```
+
+### Types
+
+```typescript
+ConditionalOptions                  // { name?, key?, reason? }
+ConditionalContext                  // { workflowId, onEvent? }
+```
+
+## Webhook / Event Triggers
+
+```typescript
+createWebhookHandler(workflow, fn, config) // Create HTTP handler
+createSimpleHandler(config)                // Simple endpoint handler
+createEventHandler(workflow, fn, config)   // Queue event handler
+createResultMapper(mappings, options)      // Map errors to HTTP codes
+createExpressHandler(handler)              // Express middleware
+toWebhookRequest(req)                      // Convert Express request
+sendWebhookResponse(res, response)         // Send Express response
+validationError(message, field, details)   // Create validation error
+requireFields(fields)                      // Field validator
+composeValidators(...validators)           // Combine validators
+```
+
+### Types
+
+```typescript
+WebhookRequest<Body>                // Generic HTTP request
+WebhookResponse<T>                  // Generic HTTP response
+WebhookHandler<TBody>               // Handler function type
+ValidationError                     // Validation error type
+EventMessage<T>                     // Queue message type
+EventProcessingResult               // Processing result type
+```
+
+## Policy Middleware
+
+```typescript
+mergePolicies(...policies)          // Combine policies
+createPolicyApplier(...policies)    // Create policy applier
+withPolicy(policy, options)         // Apply single policy
+withPolicies(policies, name)        // Apply multiple policies
+createPolicyRegistry()              // Create policy registry
+stepOptions()                       // Fluent builder
+retryPolicies.standard              // Retry presets
+timeoutPolicies.api                 // Timeout presets
+servicePolicies.httpApi             // Combined presets
+```
+
+### Types
+
+```typescript
+Policy                              // Policy type
+PolicyFactory                       // Factory type
+NamedPolicy                         // Named policy type
+PolicyRegistry                      // Registry interface
+StepOptionsBuilder                  // Fluent builder type
+```
+
+## Persistence
+
+```typescript
+createMemoryCache(options)          // In-memory cache
+createFileCache(options)            // File-based cache
+createKVCache(options)              // Key-value store cache
+createStatePersistence(store, prefix)      // State persistence
+createHydratingCache(memory, persist, id)  // Hydrating cache
+serializeState(state)               // Serialize resume state
+deserializeState(data)              // Deserialize resume state
+stringifyState(state, meta)         // JSON stringify
+parseState(json)                    // JSON parse
+```
+
+### Types
+
+```typescript
+SerializedState                     // JSON-safe state
+MemoryCacheOptions                  // Memory cache config
+FileCacheOptions                    // File cache config
+KeyValueStore                       // KV store interface
+StatePersistence                    // Persistence interface
+```
+
+## Devtools
+
+```typescript
+createDevtools(options)             // Create devtools instance
+renderDiff(diff)                    // Render run diff
+quickVisualize(events)              // Quick visualization
+createConsoleLogger(options)        // Console event logger
+```
+
+### Types
+
+```typescript
+WorkflowRun                         // Captured run data
+RunDiff                             // Diff between runs
+StepDiff                            // Step-level diff
+TimelineEntry                       // Timeline data
+Devtools                            // Devtools interface
+```
+
+## HITL Orchestration
+
+```typescript
+createHITLOrchestrator(options)     // Create orchestrator
+createMemoryApprovalStore()         // In-memory approval store
+createMemoryWorkflowStateStore()    // In-memory state store
+createApprovalWebhookHandler(store) // Webhook for approvals
+createApprovalChecker(store, key)   // Approval status checker
+```
+
+### Types
+
+```typescript
+HITLOrchestrator                    // Orchestrator interface
+ApprovalStore                       // Approval storage interface
+WorkflowStateStore                  // State storage interface
+HITLExecutionResult                 // Execution result type
+ApprovalStatus                      // Approval status type
+```
+
+## Testing
+
+```typescript
+createWorkflowHarness(deps, options)       // Create test harness
+createMockFn<T, E>()                       // Create mock function
+createTestClock(startTime)                 // Deterministic clock
+createSnapshot(invocations, result)        // Create snapshot
+compareSnapshots(snapshot1, snapshot2)     // Compare snapshots
+okOutcome(value)                           // Helper for ok outcome
+errOutcome(error)                          // Helper for err outcome
+throwOutcome(error)                        // Helper for throw outcome
+```
+
+### Types
+
+```typescript
+WorkflowHarness<E, Deps>            // Test harness interface
+MockStep<E>                         // Mock step function
+MockFunction<T, E>                  // Mock function interface
+ScriptedOutcome<T, E>               // Scripted step outcome
+StepInvocation                      // Invocation record
+AssertionResult                     // Assertion result
+WorkflowSnapshot                    // Snapshot for comparison
+```
+
+## OpenTelemetry (Autotel)
+
+```typescript
+createAutotelAdapter(config)        // Create metrics adapter
+createAutotelEventHandler(options)  // Event handler for debug
+withAutotelTracing(trace, options)  // Wrap with tracing
+```
+
+### Types
+
+```typescript
+AutotelAdapterConfig                // Adapter configuration
+AutotelMetrics                      // Collected metrics
+AutotelAdapter                      // Adapter interface
+AutotelTraceFn                      // Trace function type
+```

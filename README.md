@@ -287,6 +287,11 @@ if (result.ok) {
 | `allAsync`, `partition` | Batch operations |
 | `isStepTimeoutError(e)` | Check if error is a timeout |
 | `getStepTimeoutMeta(e)` | Get timeout metadata from error |
+| `createCircuitBreaker(name, config)` | Create circuit breaker for step protection |
+| `createSagaWorkflow(deps, opts)` | Create saga with auto-compensation |
+| `createRateLimiter(name, config)` | Control step throughput |
+| `createWebhookHandler(workflow, fn, config)` | Expose workflow as HTTP endpoint |
+| `createWorkflowHarness(deps, opts)` | Create test harness for workflows |
 
 ### Choosing Between run() and createWorkflow()
 
@@ -550,7 +555,20 @@ if (!result.ok && isPendingApproval(result.error)) {
 
 ### More utilities
 
-See [docs/advanced.md](docs/advanced.md) for batch operations, transformers, and neverthrow interop.
+See [docs/advanced.md](docs/advanced.md) for:
+- Batch operations (`all`, `allSettled`, `partition`)
+- Result transformers (`map`, `andThen`, `match`)
+- Circuit breaker pattern
+- Saga/compensation pattern for rollbacks
+- Rate limiting and concurrency control
+- Workflow versioning and migrations
+- Pluggable persistence adapters
+- Webhook and event trigger adapters
+- Policy-driven step middleware
+- Developer tools and visualization
+- HITL orchestration helpers
+- Deterministic testing harness
+- OpenTelemetry integration
 
 ## API Reference
 

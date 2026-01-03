@@ -48,6 +48,12 @@ import {
   unwrapOr,
   WorkflowEvent,
   unwrapOrElse,
+  // New transform and recovery helpers
+  bimap,
+  orElse,
+  orElseAsync,
+  recover,
+  recoverAsync,
   // HITL exports
   PendingApproval,
   ApprovalRejected,
@@ -2062,6 +2068,252 @@ describe("tapError() - side effects on err", () => {
 
     expect(called).toBe(false);
     expect(result).toEqual({ ok: true, value: 42 });
+  });
+});
+
+describe("bimap() - transform both value and error", () => {
+  it("transforms ok value with onOk function", () => {
+    const result: Result<number, string> = ok(42);
+    const mapped = bimap(
+      result,
+      (n) => n * 2,
+      (e) => ({ code: e })
+    );
+    expect(mapped).toEqual({ ok: true, value: 84 });
+  });
+
+  it("transforms error with onErr function", () => {
+    const result: Result<number, string> = err("not_found");
+    const mapped = bimap(
+      result,
+      (n) => n * 2,
+      (e) => ({ code: e.toUpperCase() })
+    );
+    expect(mapped).toEqual({ ok: false, error: { code: "NOT_FOUND" } });
+  });
+
+  it("preserves cause when mapping error", () => {
+    const cause = new Error("original");
+    const result: Result<number, string> = err("failed", { cause });
+    const mapped = bimap(
+      result,
+      (n) => n * 2,
+      (e) => `wrapped: ${e}`
+    );
+
+    if (isErr(mapped)) {
+      expect(mapped.cause).toBe(cause);
+    }
+  });
+
+  it("output types reflect both transformations", () => {
+    const okResult: Result<number, string> = ok(42);
+    const mappedOk = bimap(
+      okResult,
+      String,
+      (e) => ({ code: e })
+    );
+    if (isOk(mappedOk)) {
+      const str: string = mappedOk.value;
+      expect(str).toBe("42");
+    }
+
+    const errResult: Result<number, string> = err("oops");
+    const mappedErr = bimap(
+      errResult,
+      String,
+      () => 404
+    );
+    if (isErr(mappedErr)) {
+      const code: number = mappedErr.error;
+      expect(code).toBe(404);
+    }
+  });
+});
+
+describe("orElse() - error recovery returning Result", () => {
+  it("returns original result for ok", () => {
+    const result: Result<number, string> = ok(42);
+    const recovered = orElse(result, (error) => ok(0));
+    expect(recovered).toEqual({ ok: true, value: 42 });
+  });
+
+  it("calls recovery function for err and returns new Result", () => {
+    const result: Result<number, string> = err("not_found");
+    const recovered = orElse(result, (error) =>
+      error === "not_found" ? ok(0) : err("other" as const)
+    );
+    expect(recovered).toEqual({ ok: true, value: 0 });
+  });
+
+  it("can return a different error from recovery", () => {
+    const result: Result<number, string> = err("not_found");
+    const recovered = orElse(result, () => err("converted" as const));
+    expect(recovered).toEqual({ ok: false, error: "converted" });
+  });
+
+  it("receives cause in recovery function", () => {
+    const cause = new Error("original");
+    const result: Result<number, string> = err("failed", { cause });
+    let receivedCause: unknown;
+
+    orElse(result, (error, c) => {
+      receivedCause = c;
+      return ok(0);
+    });
+
+    expect(receivedCause).toBe(cause);
+  });
+
+  it("preserves type narrowing for error recovery", () => {
+    type MyError = "NOT_FOUND" | "FORBIDDEN";
+    const result: Result<number, MyError> = err("NOT_FOUND");
+
+    const recovered = orElse(result, (error) => {
+      if (error === "NOT_FOUND") {
+        return ok(-1);
+      }
+      return err("unrecoverable" as const);
+    });
+
+    expect(isOk(recovered)).toBe(true);
+    if (isOk(recovered)) {
+      expect(recovered.value).toBe(-1);
+    }
+  });
+});
+
+describe("orElseAsync() - async error recovery returning Result", () => {
+  it("returns original result for ok", async () => {
+    const result: Result<number, string> = ok(42);
+    const recovered = await orElseAsync(result, async (error) => ok(0));
+    expect(recovered).toEqual({ ok: true, value: 42 });
+  });
+
+  it("calls async recovery function for err", async () => {
+    const result: Result<number, string> = err("not_found");
+    const recovered = await orElseAsync(result, async (error) => {
+      await new Promise((r) => setTimeout(r, 1));
+      return error === "not_found" ? ok(0) : err("other" as const);
+    });
+    expect(recovered).toEqual({ ok: true, value: 0 });
+  });
+
+  it("can return a different error from async recovery", async () => {
+    const result: Result<number, string> = err("not_found");
+    const recovered = await orElseAsync(result, async () => {
+      await new Promise((r) => setTimeout(r, 1));
+      return err("async_error" as const);
+    });
+    expect(recovered).toEqual({ ok: false, error: "async_error" });
+  });
+
+  it("receives cause in async recovery function", async () => {
+    const cause = new Error("original");
+    const result: Result<number, string> = err("failed", { cause });
+    let receivedCause: unknown;
+
+    await orElseAsync(result, async (error, c) => {
+      receivedCause = c;
+      return ok(0);
+    });
+
+    expect(receivedCause).toBe(cause);
+  });
+});
+
+describe("recover() - error recovery returning plain value (guaranteed success)", () => {
+  it("returns original result for ok", () => {
+    const result: Result<number, string> = ok(42);
+    const recovered = recover(result, () => 0);
+    expect(recovered).toEqual({ ok: true, value: 42 });
+  });
+
+  it("recovers error to ok with provided value", () => {
+    const result: Result<number, string> = err("not_found");
+    const recovered = recover(result, (error) =>
+      error === "not_found" ? -1 : 0
+    );
+    expect(recovered).toEqual({ ok: true, value: -1 });
+  });
+
+  it("receives cause in recovery function", () => {
+    const cause = new Error("original");
+    const result: Result<number, string> = err("failed", { cause });
+    let receivedCause: unknown;
+
+    recover(result, (error, c) => {
+      receivedCause = c;
+      return 0;
+    });
+
+    expect(receivedCause).toBe(cause);
+  });
+
+  it("result is always ok (error type is never)", () => {
+    const result: Result<number, string> = err("oops");
+    const recovered = recover(result, () => 0);
+
+    // TypeScript: recovered.error would be `never` type
+    expect(isOk(recovered)).toBe(true);
+    expect(recovered.ok).toBe(true);
+  });
+
+  it("can use error value to compute recovery value", () => {
+    type ErrorCode = "NOT_FOUND" | "FORBIDDEN" | "SERVER_ERROR";
+    const result: Result<number, ErrorCode> = err("SERVER_ERROR");
+
+    const recovered = recover(result, (error) => {
+      const fallbacks: Record<ErrorCode, number> = {
+        NOT_FOUND: -1,
+        FORBIDDEN: -2,
+        SERVER_ERROR: -500,
+      };
+      return fallbacks[error];
+    });
+
+    expect(recovered).toEqual({ ok: true, value: -500 });
+  });
+});
+
+describe("recoverAsync() - async error recovery returning plain value", () => {
+  it("returns original result for ok", async () => {
+    const result: Result<number, string> = ok(42);
+    const recovered = await recoverAsync(result, async () => 0);
+    expect(recovered).toEqual({ ok: true, value: 42 });
+  });
+
+  it("recovers error to ok with async-computed value", async () => {
+    const result: Result<number, string> = err("not_found");
+    const recovered = await recoverAsync(result, async (error) => {
+      await new Promise((r) => setTimeout(r, 1));
+      return error === "not_found" ? -1 : 0;
+    });
+    expect(recovered).toEqual({ ok: true, value: -1 });
+  });
+
+  it("receives cause in async recovery function", async () => {
+    const cause = new Error("original");
+    const result: Result<number, string> = err("failed", { cause });
+    let receivedCause: unknown;
+
+    await recoverAsync(result, async (error, c) => {
+      receivedCause = c;
+      return 0;
+    });
+
+    expect(receivedCause).toBe(cause);
+  });
+
+  it("result is always ok after async recovery", async () => {
+    const result: Result<number, string> = err("oops");
+    const recovered = await recoverAsync(result, async () => {
+      await new Promise((r) => setTimeout(r, 1));
+      return 999;
+    });
+
+    expect(isOk(recovered)).toBe(true);
+    expect(recovered).toEqual({ ok: true, value: 999 });
   });
 });
 

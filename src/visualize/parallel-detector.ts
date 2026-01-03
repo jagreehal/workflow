@@ -79,7 +79,7 @@ export function detectParallelGroups(
     return nodes;
   }
 
-  const { maxGapMs = 5 } = options;
+  const { minOverlapMs = 0, maxGapMs = 5 } = options;
 
   // Extract step nodes with timing info, preserving indices for position restoration
   const stepsWithTiming: (StepTiming & { originalIndex: number })[] = [];
@@ -114,13 +114,35 @@ export function detectParallelGroups(
 
   for (let i = 1; i < stepsWithTiming.length; i++) {
     const step = stepsWithTiming[i];
+    const groupStart = Math.min(...currentGroup.map((s) => s.startTs));
     const groupEnd = Math.max(...currentGroup.map((s) => s.endTs));
 
-    // Check if this step overlaps with current group
-    if (step.startTs <= groupEnd + maxGapMs) {
+    // Two ways steps can be parallel:
+    // 1. They started together (within maxGapMs) - handles timing jitter
+    // 2. They genuinely overlap (step starts before group ends)
+    const startedTogether = step.startTs <= groupStart + maxGapMs;
+    const hasTrueOverlap = step.startTs < groupEnd;
+
+    if (!startedTogether && !hasTrueOverlap) {
+      // Sequential: step started after group ended AND not with the group
+      groups.push(currentGroup);
+      currentGroup = [step];
+      continue;
+    }
+
+    // Check minOverlapMs threshold for overlap duration
+    // For steps that started together, overlap is measured from step start to group end
+    // For steps with true overlap, it's from step start to min(step end, group end)
+    const overlapDuration = hasTrueOverlap
+      ? Math.min(step.endTs, groupEnd) - step.startTs
+      : 0;
+
+    // Started together bypasses minOverlapMs (they're parallel by definition)
+    // True overlap must meet the minOverlapMs threshold
+    if (startedTogether || overlapDuration >= minOverlapMs) {
       currentGroup.push(step);
     } else {
-      // No overlap - finalize current group and start new one
+      // Overlap too small - treat as sequential
       groups.push(currentGroup);
       currentGroup = [step];
     }

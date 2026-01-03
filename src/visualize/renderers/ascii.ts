@@ -234,18 +234,24 @@ function renderParallelNode(
   lines.push(`${indent}${BOX.teeRight}${BOX.teeDown}${BOX.horizontal} ${symbol} ${bold(name)}${mode}`);
 
   // Children
-  for (let i = 0; i < node.children.length; i++) {
-    const child = node.children[i];
-    const isLast = i === node.children.length - 1;
-    const prefix = isLast ? `${indent}${BOX.vertical} ${BOX.bottomLeft}` : `${indent}${BOX.vertical} ${BOX.teeRight}`;
+  if (node.children.length === 0) {
+    // Empty parallel scope - operations inside allAsync/anyAsync weren't tracked as steps
+    lines.push(`${indent}${BOX.vertical} ${dim("(operations not individually tracked)")}`);
+    lines.push(`${indent}${BOX.vertical} ${dim("(wrap each operation with step() to see individual steps)")}`);
+  } else {
+    for (let i = 0; i < node.children.length; i++) {
+      const child = node.children[i];
+      const isLast = i === node.children.length - 1;
+      const prefix = isLast ? `${indent}${BOX.vertical} ${BOX.bottomLeft}` : `${indent}${BOX.vertical} ${BOX.teeRight}`;
 
-    if (isStepNode(child)) {
-      lines.push(`${prefix} ${renderStepNode(child, options, colors)}`);
-    } else {
-      // Nested structure - recurse
-      const nestedLines = renderNodes([child], options, colors, depth + 1);
-      for (const line of nestedLines) {
-        lines.push(`${indent}${BOX.vertical}   ${line}`);
+      if (isStepNode(child)) {
+        lines.push(`${prefix} ${renderStepNode(child, options, colors)}`);
+      } else {
+        // Nested structure - recurse
+        const nestedLines = renderNodes([child], options, colors, depth + 1);
+        for (const line of nestedLines) {
+          lines.push(`${indent}${BOX.vertical}   ${line}`);
+        }
       }
     }
   }
@@ -276,21 +282,27 @@ function renderRaceNode(
   lines.push(`${indent}${BOX.teeRight}⚡ ${symbol} ${bold(name)}`);
 
   // Children
-  for (let i = 0; i < node.children.length; i++) {
-    const child = node.children[i];
-    const isLast = i === node.children.length - 1;
-    const prefix = isLast ? `${indent}${BOX.vertical} ${BOX.bottomLeft}` : `${indent}${BOX.vertical} ${BOX.teeRight}`;
+  if (node.children.length === 0) {
+    // Empty race scope - operations inside anyAsync weren't tracked as steps
+    lines.push(`${indent}${BOX.vertical} ${dim("(operations not individually tracked)")}`);
+    lines.push(`${indent}${BOX.vertical} ${dim("(wrap each operation with step() to see individual steps)")}`);
+  } else {
+    for (let i = 0; i < node.children.length; i++) {
+      const child = node.children[i];
+      const isLast = i === node.children.length - 1;
+      const prefix = isLast ? `${indent}${BOX.vertical} ${BOX.bottomLeft}` : `${indent}${BOX.vertical} ${BOX.teeRight}`;
 
-    // Mark winner
-    const isWinner = node.winnerId && child.id === node.winnerId;
-    const winnerSuffix = isWinner ? dim(" (winner)") : "";
+      // Mark winner
+      const isWinner = node.winnerId && child.id === node.winnerId;
+      const winnerSuffix = isWinner ? dim(" (winner)") : "";
 
-    if (isStepNode(child)) {
-      lines.push(`${prefix} ${renderStepNode(child, options, colors)}${winnerSuffix}`);
-    } else {
-      const nestedLines = renderNodes([child], options, colors, depth + 1);
-      for (const line of nestedLines) {
-        lines.push(`${indent}${BOX.vertical}   ${line}`);
+      if (isStepNode(child)) {
+        lines.push(`${prefix} ${renderStepNode(child, options, colors)}${winnerSuffix}`);
+      } else {
+        const nestedLines = renderNodes([child], options, colors, depth + 1);
+        for (const line of nestedLines) {
+          lines.push(`${indent}${BOX.vertical}   ${line}`);
+        }
       }
     }
   }

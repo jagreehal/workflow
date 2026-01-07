@@ -3306,7 +3306,367 @@ describe("createWorkflow()", () => {
       expect(callCount).toBe(2);
       expect(cache.size).toBe(0);
     });
+  });
 
+  describe("workflow hooks", () => {
+    describe("onBeforeStart", () => {
+      it("calls onBeforeStart before workflow execution", async () => {
+        const onBeforeStart = vi.fn().mockResolvedValue(true);
+        const workflow = createWorkflow({ fetchUser }, { onBeforeStart });
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(onBeforeStart).toHaveBeenCalledTimes(1);
+        const call = onBeforeStart.mock.calls[0];
+        expect(call[0]).toMatch(/^[0-9a-f-]{36}$/); // workflowId UUID
+        expect(call[1]).toBeUndefined(); // context (void by default)
+      });
+
+      it("skips workflow when onBeforeStart returns false", async () => {
+        const onBeforeStart = vi.fn().mockResolvedValue(false);
+        const workflow = createWorkflow({ fetchUser }, { onBeforeStart });
+
+        const result = await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(onBeforeStart).toHaveBeenCalledTimes(1);
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error).toBeDefined();
+        }
+      });
+
+      it("supports sync onBeforeStart", async () => {
+        const onBeforeStart = vi.fn().mockReturnValue(true);
+        const workflow = createWorkflow({ fetchUser }, { onBeforeStart });
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(onBeforeStart).toHaveBeenCalledTimes(1);
+      });
+
+      it("passes context to onBeforeStart", async () => {
+        type Context = { userId: string };
+        const onBeforeStart = vi.fn<[string, Context], Promise<boolean>>().mockResolvedValue(true);
+        const createContext = (): Context => ({ userId: "user-123" });
+        const workflow = createWorkflow<{ fetchUser: typeof fetchUser }, Context>({ fetchUser }, { onBeforeStart, createContext });
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(onBeforeStart).toHaveBeenCalledTimes(1);
+        expect(onBeforeStart.mock.calls[0][1]).toEqual({ userId: "user-123" });
+      });
+
+      it("works in strict mode", async () => {
+        const onBeforeStart = vi.fn().mockResolvedValue(true);
+        const workflow = createWorkflow(
+          { fetchUser },
+          {
+            strict: true,
+            catchUnexpected: () => "UNEXPECTED" as const,
+            onBeforeStart,
+          }
+        );
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(onBeforeStart).toHaveBeenCalledTimes(1);
+      });
+
+      it("returns Result when onBeforeStart throws (not rejects workflow)", async () => {
+        const hookError = new Error("Lock acquisition failed");
+        const onBeforeStart = vi.fn().mockRejectedValue(hookError);
+        const workflow = createWorkflow({ fetchUser }, { onBeforeStart });
+
+        // Should NOT throw/reject - should return Result
+        const result = await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect((result.error as { type: string }).type).toBe("UNEXPECTED_ERROR");
+          expect((result.error as { cause: { thrown: Error } }).cause.thrown).toBe(hookError);
+        }
+      });
+
+      it("routes thrown onBeforeStart error through catchUnexpected in strict mode", async () => {
+        const hookError = new Error("Lock acquisition failed");
+        const onBeforeStart = vi.fn().mockRejectedValue(hookError);
+        const catchUnexpected = vi.fn().mockReturnValue("LOCK_FAILED" as const);
+        const workflow = createWorkflow(
+          { fetchUser },
+          {
+            strict: true,
+            catchUnexpected,
+            onBeforeStart,
+          }
+        );
+
+        const result = await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error).toBe("LOCK_FAILED");
+        }
+        expect(catchUnexpected).toHaveBeenCalledTimes(1);
+        expect(catchUnexpected.mock.calls[0][0]).toBe(hookError);
+      });
+    });
+
+    describe("onAfterStep", () => {
+      it("calls onAfterStep after each keyed step completes", async () => {
+        const onAfterStep = vi.fn();
+        const workflow = createWorkflow({ fetchUser, fetchPosts }, { onAfterStep });
+
+        await workflow(async (step) => {
+          const user = await step(() => fetchUser("1"), { key: "user:1" });
+          const posts = await step(() => fetchPosts(user.id), { key: "posts:1" });
+          return { user, posts };
+        });
+
+        expect(onAfterStep).toHaveBeenCalledTimes(2);
+        expect(onAfterStep.mock.calls[0][0]).toBe("user:1");
+        expect(onAfterStep.mock.calls[0][1].ok).toBe(true);
+        expect(onAfterStep.mock.calls[0][2]).toMatch(/^[0-9a-f-]{36}$/); // workflowId
+        expect(onAfterStep.mock.calls[1][0]).toBe("posts:1");
+      });
+
+      it("calls onAfterStep even when step fails", async () => {
+        const onAfterStep = vi.fn();
+        const workflow = createWorkflow({ fetchUser, fetchPosts }, { onAfterStep });
+
+        await workflow(async (step) => {
+          const user = await step(() => fetchUser("1"), { key: "user:1" });
+          const posts = await step(() => fetchPosts("999"), { key: "posts:999" }); // Will fail
+          return { user, posts };
+        });
+
+        expect(onAfterStep).toHaveBeenCalledTimes(2);
+        expect(onAfterStep.mock.calls[0][1].ok).toBe(true);
+        expect(onAfterStep.mock.calls[1][1].ok).toBe(false);
+        if (!onAfterStep.mock.calls[1][1].ok) {
+          expect(onAfterStep.mock.calls[1][1].error).toBe("FETCH_ERROR");
+        }
+      });
+
+      it("does not call onAfterStep for cached steps", async () => {
+        const onAfterStep = vi.fn();
+        const cache = new Map<string, Result<unknown, unknown>>();
+        cache.set("user:1", ok({ id: "1", name: "Alice" }));
+
+        const workflow = createWorkflow({ fetchUser }, { onAfterStep, cache });
+
+        await workflow(async (step) => {
+          return await step(() => fetchUser("1"), { key: "user:1" });
+        });
+
+        expect(onAfterStep).not.toHaveBeenCalled();
+      });
+
+      it("passes context to onAfterStep", async () => {
+        type Context = { requestId: string };
+        const onAfterStep = vi.fn().mockImplementation((_stepKey: string, _result: Result<unknown, unknown, unknown>, _workflowId: string, _ctx: Context) => Promise.resolve());
+        const createContext = (): Context => ({ requestId: "req-456" });
+        const workflow = createWorkflow({ fetchUser }, { onAfterStep, createContext });
+
+        await workflow(async (step) => {
+          return await step(() => fetchUser("1"), { key: "user:1" });
+        });
+
+        expect(onAfterStep).toHaveBeenCalledTimes(1);
+        expect(onAfterStep.mock.calls[0][3]).toEqual({ requestId: "req-456" });
+      });
+
+      it("works in strict mode", async () => {
+        const onAfterStep = vi.fn();
+        const workflow = createWorkflow(
+          { fetchUser },
+          {
+            strict: true,
+            catchUnexpected: () => "UNEXPECTED" as const,
+            onAfterStep,
+          }
+        );
+
+        await workflow(async (step) => {
+          return await step(() => fetchUser("1"), { key: "user:1" });
+        });
+
+        expect(onAfterStep).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe("shouldRun", () => {
+      it("calls shouldRun before workflow execution", async () => {
+        const shouldRun = vi.fn().mockResolvedValue(true);
+        const workflow = createWorkflow({ fetchUser }, { shouldRun });
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(shouldRun).toHaveBeenCalledTimes(1);
+        expect(shouldRun.mock.calls[0][0]).toMatch(/^[0-9a-f-]{36}$/); // workflowId
+        expect(shouldRun.mock.calls[0][1]).toBeUndefined(); // context
+      });
+
+      it("skips workflow when shouldRun returns false", async () => {
+        const shouldRun = vi.fn().mockResolvedValue(false);
+        const workflow = createWorkflow({ fetchUser }, { shouldRun });
+
+        const result = await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(shouldRun).toHaveBeenCalledTimes(1);
+        expect(result.ok).toBe(false);
+      });
+
+      it("supports sync shouldRun", async () => {
+        const shouldRun = vi.fn().mockReturnValue(true);
+        const workflow = createWorkflow({ fetchUser }, { shouldRun });
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(shouldRun).toHaveBeenCalledTimes(1);
+      });
+
+      it("passes context to shouldRun", async () => {
+        type Context = { instanceId: string };
+        const shouldRun = vi.fn().mockImplementation((_workflowId: string, _ctx: Context) => Promise.resolve(true));
+        const createContext = (): Context => ({ instanceId: "instance-789" });
+        const workflow = createWorkflow({ fetchUser }, { shouldRun, createContext });
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(shouldRun).toHaveBeenCalledTimes(1);
+        expect(shouldRun.mock.calls[0][1]).toEqual({ instanceId: "instance-789" });
+      });
+
+      it("works in strict mode", async () => {
+        const shouldRun = vi.fn().mockResolvedValue(true);
+        const workflow = createWorkflow(
+          { fetchUser },
+          {
+            strict: true,
+            catchUnexpected: () => "UNEXPECTED" as const,
+            shouldRun,
+          }
+        );
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(shouldRun).toHaveBeenCalledTimes(1);
+      });
+
+      it("skip error goes through catchUnexpected in strict mode", async () => {
+        const shouldRun = vi.fn().mockResolvedValue(false);
+        const catchUnexpected = vi.fn().mockReturnValue("SKIPPED" as const);
+        const workflow = createWorkflow(
+          { fetchUser },
+          {
+            strict: true,
+            catchUnexpected,
+            shouldRun,
+          }
+        );
+
+        const result = await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          // Error should be the mapped value from catchUnexpected, not UnexpectedError
+          expect(result.error).toBe("SKIPPED");
+        }
+        expect(catchUnexpected).toHaveBeenCalledTimes(1);
+        expect(catchUnexpected.mock.calls[0][0]).toBeInstanceOf(Error);
+        expect((catchUnexpected.mock.calls[0][0] as Error).message).toBe("Workflow skipped by shouldRun hook");
+      });
+
+      it("returns Result when shouldRun throws (not rejects workflow)", async () => {
+        const hookError = new Error("Redis connection failed");
+        const shouldRun = vi.fn().mockRejectedValue(hookError);
+        const workflow = createWorkflow({ fetchUser }, { shouldRun });
+
+        // Should NOT throw/reject - should return Result
+        const result = await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect((result.error as { type: string }).type).toBe("UNEXPECTED_ERROR");
+          expect((result.error as { cause: { thrown: Error } }).cause.thrown).toBe(hookError);
+        }
+      });
+
+      it("routes thrown hook error through catchUnexpected in strict mode", async () => {
+        const hookError = new Error("Redis connection failed");
+        const shouldRun = vi.fn().mockRejectedValue(hookError);
+        const catchUnexpected = vi.fn().mockReturnValue("HOOK_FAILED" as const);
+        const workflow = createWorkflow(
+          { fetchUser },
+          {
+            strict: true,
+            catchUnexpected,
+            shouldRun,
+          }
+        );
+
+        const result = await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error).toBe("HOOK_FAILED");
+        }
+        expect(catchUnexpected).toHaveBeenCalledTimes(1);
+        expect(catchUnexpected.mock.calls[0][0]).toBe(hookError);
+      });
+
+      it("shouldRun is called before onBeforeStart", async () => {
+        const callOrder: string[] = [];
+        const shouldRun = vi.fn().mockImplementation(() => {
+          callOrder.push("shouldRun");
+          return true;
+        });
+        const onBeforeStart = vi.fn().mockImplementation(() => {
+          callOrder.push("onBeforeStart");
+          return true;
+        });
+        const workflow = createWorkflow({ fetchUser }, { shouldRun, onBeforeStart });
+
+        await workflow(async (step) => {
+          return await step(fetchUser("1"));
+        });
+
+        expect(callOrder).toEqual(["shouldRun", "onBeforeStart"]);
+      });
+    });
+  });
+
+  describe("step caching (continued)", () => {
     it("cache persists across workflow runs", async () => {
       let callCount = 0;
       const expensiveOp = async (id: string): AsyncResult<{ id: string; count: number }, "ERROR"> => {
@@ -5334,3 +5694,173 @@ describe("Retry + Timeout Combined", () => {
     expect(retryEvents).toHaveLength(2);
   });
 });
+
+// =============================================================================
+// Named Object Parallel Tests
+// =============================================================================
+
+describe("step.parallel() named object form", () => {
+  const fetchUser = (id: string): AsyncResult<{ id: string; name: string }, "NOT_FOUND"> =>
+    Promise.resolve(id === "missing" ? err("NOT_FOUND") : ok({ id, name: `User ${id}` }));
+
+  const fetchPosts = (userId: string): AsyncResult<{ id: string; title: string }[], "FETCH_ERROR"> =>
+    Promise.resolve(ok([{ id: "p1", title: `Post by ${userId}` }]));
+
+  const fetchComments = (postId: string): AsyncResult<string[], "COMMENTS_ERROR"> =>
+    Promise.resolve(ok([`Comment on ${postId}`]));
+
+  it("should execute operations in parallel and return named results", async () => {
+    const events: WorkflowEvent<unknown>[] = [];
+
+    const result = await run(
+      async (step) => {
+        const { user, posts } = await step.parallel({
+          user: () => fetchUser("1"),
+          posts: () => fetchPosts("1"),
+        });
+
+        return { user, posts };
+      },
+      {
+        onEvent: (e) => events.push(e),
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.user).toEqual({ id: "1", name: "User 1" });
+      expect(result.value.posts).toEqual([{ id: "p1", title: "Post by 1" }]);
+    }
+
+    // Should emit scope_start and scope_end events
+    const scopeStart = events.find((e) => e.type === "scope_start");
+    const scopeEnd = events.find((e) => e.type === "scope_end");
+    expect(scopeStart).toBeDefined();
+    expect(scopeEnd).toBeDefined();
+  });
+
+  it("should accept custom name in options", async () => {
+    const events: WorkflowEvent<unknown>[] = [];
+
+    await run(
+      async (step) => {
+        const { user, posts } = await step.parallel(
+          {
+            user: () => fetchUser("1"),
+            posts: () => fetchPosts("1"),
+          },
+          { name: "Fetch user data" }
+        );
+        return { user, posts };
+      },
+      {
+        onEvent: (e) => events.push(e),
+      }
+    );
+
+    const scopeStart = events.find((e) => e.type === "scope_start");
+    expect(scopeStart?.type === "scope_start" && scopeStart.name).toBe("Fetch user data");
+  });
+
+  it("should fail fast on first error", async () => {
+    const events: WorkflowEvent<unknown>[] = [];
+
+    // Use createWorkflow for proper error type inference
+    // (run() with catchUnexpected can't infer error types from callback body)
+    const workflow = createWorkflow(
+      { fetchUser, fetchPosts },
+      { onEvent: (e) => events.push(e) }
+    );
+
+    const result = await workflow(async (step, { fetchUser, fetchPosts }) => {
+      const { user, posts } = await step.parallel({
+        user: () => fetchUser("missing"), // This will fail
+        posts: () => fetchPosts("1"),
+      });
+      return { user, posts };
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // Error type is properly inferred as "NOT_FOUND" | "FETCH_ERROR" | UnexpectedError
+      expect(result.error).toBe("NOT_FOUND");
+    }
+  });
+
+  it("should fail fast when later key fails before earlier keys complete", async () => {
+    // Regression test: when a later key fails while earlier keys are still pending,
+    // the fail-fast logic must not crash on undefined array holes
+    const slowOp = (): AsyncResult<string, "SLOW_ERROR"> =>
+      new Promise((resolve) => setTimeout(() => resolve(ok("slow")), 100));
+
+    const fastFailOp = (): AsyncResult<string, "FAST_ERROR"> =>
+      Promise.resolve(err("FAST_ERROR"));
+
+    const workflow = createWorkflow({ slowOp, fastFailOp });
+
+    const result = await workflow(async (step, { slowOp, fastFailOp }) => {
+      // slowOp is first but takes 100ms, fastFailOp is second but fails immediately
+      const { slow, fast } = await step.parallel({
+        slow: () => slowOp(),
+        fast: () => fastFailOp(),
+      });
+      return { slow, fast };
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe("FAST_ERROR");
+    }
+  });
+
+  it("should support three or more operations", async () => {
+    const result = await run(async (step) => {
+      const { user, posts, comments } = await step.parallel({
+        user: () => fetchUser("1"),
+        posts: () => fetchPosts("1"),
+        comments: () => fetchComments("p1"),
+      });
+
+      return { user, posts, comments };
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.user).toEqual({ id: "1", name: "User 1" });
+      expect(result.value.posts).toHaveLength(1);
+      expect(result.value.comments).toEqual(["Comment on p1"]);
+    }
+  });
+
+  it("should handle empty operations object", async () => {
+    const result = await run(async (step) => {
+      const data = await step.parallel({});
+      return data;
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual({});
+    }
+  });
+
+  it("should work with createWorkflow", async () => {
+    const workflow = createWorkflow({ fetchUser, fetchPosts });
+
+    const result = await workflow(async (step, deps) => {
+      const { user, posts } = await step.parallel({
+        user: () => deps.fetchUser("1"),
+        posts: () => deps.fetchPosts("1"),
+      });
+
+      return { user, posts };
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.user.name).toBe("User 1");
+    }
+  });
+
+});
+

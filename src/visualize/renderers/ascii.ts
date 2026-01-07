@@ -14,6 +14,10 @@ import type {
   RenderOptions,
   StepNode,
   WorkflowIR,
+  EnhancedRenderOptions,
+  HeatLevel,
+  WorkflowHooks,
+  HookExecution,
 } from "../types";
 import { isParallelNode, isRaceNode, isStepNode, isDecisionNode } from "../types";
 import { formatDuration } from "../utils/timing";
@@ -44,6 +48,76 @@ const BOX = {
   teeUp: "┴",
   cross: "┼",
 } as const;
+
+// =============================================================================
+// Heatmap Colors (ANSI)
+// =============================================================================
+
+/**
+ * ANSI color codes for heatmap visualization.
+ */
+const HEAT_COLORS: Record<HeatLevel, string> = {
+  cold: "\x1b[34m",      // Blue
+  cool: "\x1b[36m",      // Cyan
+  neutral: "",           // Default (no color)
+  warm: "\x1b[33m",      // Yellow
+  hot: "\x1b[31m",       // Red
+  critical: "\x1b[41m",  // Red background
+};
+
+const RESET = "\x1b[0m";
+
+/**
+ * Get ANSI color code for a heat level.
+ */
+function getHeatColor(heat: number): string {
+  if (heat < 0.2) return HEAT_COLORS.cold;
+  if (heat < 0.4) return HEAT_COLORS.cool;
+  if (heat < 0.6) return HEAT_COLORS.neutral;
+  if (heat < 0.8) return HEAT_COLORS.warm;
+  if (heat < 0.95) return HEAT_COLORS.hot;
+  return HEAT_COLORS.critical;
+}
+
+/**
+ * Apply heat coloring to a string.
+ */
+function applyHeatColor(text: string, heat: number): string {
+  const color = getHeatColor(heat);
+  if (!color) return text;
+  return `${color}${text}${RESET}`;
+}
+
+// =============================================================================
+// Sparkline Characters
+// =============================================================================
+
+const SPARK_CHARS = "▁▂▃▄▅▆▇█";
+
+/**
+ * Render a sparkline from an array of values.
+ *
+ * @param values Array of numeric values
+ * @param width Maximum characters to use (default: 10)
+ * @returns Sparkline string
+ */
+export function renderSparkline(values: number[], width = 10): string {
+  if (values.length === 0) return "";
+
+  // Take last N values
+  const subset = values.slice(-width);
+  const min = Math.min(...subset);
+  const max = Math.max(...subset);
+  const range = max - min || 1;
+
+  return subset
+    .map((v) => {
+      const normalized = (v - min) / range;
+      const index = Math.floor(normalized * (SPARK_CHARS.length - 1));
+      return SPARK_CHARS[index];
+    })
+    .join("");
+}
 
 // =============================================================================
 // Helper Functions
@@ -81,6 +155,72 @@ function horizontalLine(width: number, title?: string): string {
 }
 
 // =============================================================================
+// Hook Rendering
+// =============================================================================
+
+/**
+ * Render a single hook execution.
+ */
+function renderHookExecution(
+  hook: HookExecution,
+  label: string,
+  colors: ReturnType<typeof Object.assign>
+): string {
+  const symbol = hook.state === "success"
+    ? colorize("⚙", colors.success)
+    : colorize("⚠", colors.error);
+
+  const timing = hook.durationMs !== undefined
+    ? dim(` [${formatDuration(hook.durationMs)}]`)
+    : "";
+
+  let context = "";
+  if (hook.type === "shouldRun" && hook.context?.skipped) {
+    context = dim(" → workflow skipped");
+  } else if (hook.type === "shouldRun" && hook.context?.result === true) {
+    context = dim(" → proceed");
+  } else if (hook.type === "onBeforeStart" && hook.context?.skipped) {
+    context = dim(" → workflow skipped");
+  } else if (hook.type === "onAfterStep" && hook.context?.stepKey) {
+    context = dim(` (${hook.context.stepKey})`);
+  }
+
+  const error = hook.state === "error" && hook.error
+    ? dim(` error: ${String(hook.error)}`)
+    : "";
+
+  return `${symbol} ${dim(label)}${context}${timing}${error}`;
+}
+
+/**
+ * Render workflow hooks section.
+ */
+function renderHooks(
+  hooks: WorkflowHooks,
+  colors: ReturnType<typeof Object.assign>
+): string[] {
+  const lines: string[] = [];
+
+  // Render shouldRun hook
+  if (hooks.shouldRun) {
+    lines.push(renderHookExecution(hooks.shouldRun, "shouldRun", colors));
+  }
+
+  // Render onBeforeStart hook
+  if (hooks.onBeforeStart) {
+    lines.push(renderHookExecution(hooks.onBeforeStart, "onBeforeStart", colors));
+  }
+
+  // We don't render onAfterStep hooks here - they're shown inline with steps
+  // But if there are any, add a separator
+  if (lines.length > 0) {
+    lines.push(dim("────────────────────")); // Separator between hooks and steps
+  }
+
+  return lines;
+}
+
+// =============================================================================
 // ASCII Renderer
 // =============================================================================
 
@@ -107,8 +247,18 @@ export function asciiRenderer(): Renderer {
       );
       lines.push(`${BOX.vertical}${" ".repeat(width - 2)}${BOX.vertical}`);
 
+      // Render hooks (if any)
+      if (ir.hooks) {
+        const hookLines = renderHooks(ir.hooks, colors);
+        for (const line of hookLines) {
+          lines.push(
+            `${BOX.vertical}  ${padEnd(line, innerWidth)}${BOX.vertical}`
+          );
+        }
+      }
+
       // Render children
-      const childLines = renderNodes(ir.root.children, options, colors, 0);
+      const childLines = renderNodes(ir.root.children, options, colors, 0, ir.hooks);
       for (const line of childLines) {
         lines.push(
           `${BOX.vertical}  ${padEnd(line, innerWidth)}${BOX.vertical}`
@@ -144,19 +294,20 @@ function renderNodes(
   nodes: FlowNode[],
   options: RenderOptions,
   colors: ReturnType<typeof Object.assign>,
-  depth: number
+  depth: number,
+  hooks?: WorkflowHooks
 ): string[] {
   const lines: string[] = [];
 
   for (const node of nodes) {
     if (isStepNode(node)) {
-      lines.push(renderStepNode(node, options, colors));
+      lines.push(renderStepNode(node, options, colors, hooks));
     } else if (isParallelNode(node)) {
-      lines.push(...renderParallelNode(node, options, colors, depth));
+      lines.push(...renderParallelNode(node, options, colors, depth, hooks));
     } else if (isRaceNode(node)) {
-      lines.push(...renderRaceNode(node, options, colors, depth));
+      lines.push(...renderRaceNode(node, options, colors, depth, hooks));
     } else if (isDecisionNode(node)) {
-      lines.push(...renderDecisionNode(node, options, colors, depth));
+      lines.push(...renderDecisionNode(node, options, colors, depth, hooks));
     }
   }
 
@@ -169,11 +320,28 @@ function renderNodes(
 function renderStepNode(
   node: StepNode,
   options: RenderOptions,
-  colors: ReturnType<typeof Object.assign>
+  colors: ReturnType<typeof Object.assign>,
+  hooks?: WorkflowHooks
 ): string {
   const symbol = getColoredSymbol(node.state, colors);
   const name = node.name ?? node.key ?? "step";
-  const nameColored = colorByState(name, node.state, colors);
+
+  // Check for enhanced options
+  const enhanced = options as EnhancedRenderOptions;
+  const nodeId = node.name ?? node.id;
+
+  // Get heat value for this node (if heatmap is enabled)
+  const heat = enhanced.showHeatmap && enhanced.heatmapData
+    ? enhanced.heatmapData.heat.get(node.id) ?? enhanced.heatmapData.heat.get(nodeId)
+    : undefined;
+
+  // Apply heat coloring or default state coloring
+  let nameColored: string;
+  if (heat !== undefined) {
+    nameColored = applyHeatColor(name, heat);
+  } else {
+    nameColored = colorByState(name, node.state, colors);
+  }
 
   let line = `${symbol} ${nameColored}`;
 
@@ -184,8 +352,8 @@ function renderStepNode(
 
   // Add input/output if available (for decision understanding)
   if (node.input !== undefined) {
-    const inputStr = typeof node.input === "string" 
-      ? node.input 
+    const inputStr = typeof node.input === "string"
+      ? node.input
       : JSON.stringify(node.input).slice(0, 30);
     line += dim(` [in: ${inputStr}${inputStr.length >= 30 ? "..." : ""}]`);
   }
@@ -198,7 +366,20 @@ function renderStepNode(
 
   // Add timing if available and requested
   if (options.showTimings && node.durationMs !== undefined) {
-    line += dim(` [${formatDuration(node.durationMs)}]`);
+    // Apply heat coloring to timing if enabled
+    const timingStr = formatDuration(node.durationMs);
+    const timingDisplay = heat !== undefined
+      ? applyHeatColor(`[${timingStr}]`, heat)
+      : dim(`[${timingStr}]`);
+    line += ` ${timingDisplay}`;
+  }
+
+  // Add sparkline if enabled and history available
+  if (enhanced.showSparklines && enhanced.timingHistory) {
+    const history = enhanced.timingHistory.get(nodeId);
+    if (history && history.length > 1) {
+      line += ` ${dim(renderSparkline(history))}`;
+    }
   }
 
   // Add retry indicator if retries occurred
@@ -212,6 +393,18 @@ function renderStepNode(
     line += dim(` [timeout${timeoutInfo}]`);
   }
 
+  // Add onAfterStep hook indicator if present
+  if (hooks && node.key && hooks.onAfterStep.has(node.key)) {
+    const hookExec = hooks.onAfterStep.get(node.key)!;
+    const hookSymbol = hookExec.state === "success"
+      ? colorize("⚙", colors.success)
+      : colorize("⚠", colors.error);
+    const hookTiming = hookExec.durationMs !== undefined
+      ? dim(` ${formatDuration(hookExec.durationMs)}`)
+      : "";
+    line += ` ${hookSymbol}${hookTiming}`;
+  }
+
   return line;
 }
 
@@ -222,7 +415,8 @@ function renderParallelNode(
   node: ParallelNode,
   options: RenderOptions,
   colors: ReturnType<typeof Object.assign>,
-  depth: number
+  depth: number,
+  hooks?: WorkflowHooks
 ): string[] {
   const lines: string[] = [];
   const indent = "  ".repeat(depth);
@@ -245,10 +439,10 @@ function renderParallelNode(
       const prefix = isLast ? `${indent}${BOX.vertical} ${BOX.bottomLeft}` : `${indent}${BOX.vertical} ${BOX.teeRight}`;
 
       if (isStepNode(child)) {
-        lines.push(`${prefix} ${renderStepNode(child, options, colors)}`);
+        lines.push(`${prefix} ${renderStepNode(child, options, colors, hooks)}`);
       } else {
         // Nested structure - recurse
-        const nestedLines = renderNodes([child], options, colors, depth + 1);
+        const nestedLines = renderNodes([child], options, colors, depth + 1, hooks);
         for (const line of nestedLines) {
           lines.push(`${indent}${BOX.vertical}   ${line}`);
         }
@@ -271,7 +465,8 @@ function renderRaceNode(
   node: RaceNode,
   options: RenderOptions,
   colors: ReturnType<typeof Object.assign>,
-  depth: number
+  depth: number,
+  hooks?: WorkflowHooks
 ): string[] {
   const lines: string[] = [];
   const indent = "  ".repeat(depth);
@@ -297,9 +492,9 @@ function renderRaceNode(
       const winnerSuffix = isWinner ? dim(" (winner)") : "";
 
       if (isStepNode(child)) {
-        lines.push(`${prefix} ${renderStepNode(child, options, colors)}${winnerSuffix}`);
+        lines.push(`${prefix} ${renderStepNode(child, options, colors, hooks)}${winnerSuffix}`);
       } else {
-        const nestedLines = renderNodes([child], options, colors, depth + 1);
+        const nestedLines = renderNodes([child], options, colors, depth + 1, hooks);
         for (const line of nestedLines) {
           lines.push(`${indent}${BOX.vertical}   ${line}`);
         }
@@ -322,7 +517,8 @@ function renderDecisionNode(
   node: DecisionNode,
   options: RenderOptions,
   colors: ReturnType<typeof Object.assign>,
-  depth: number
+  depth: number,
+  hooks?: WorkflowHooks
 ): string[] {
   const lines: string[] = [];
   const indent = "  ".repeat(depth);
@@ -330,7 +526,7 @@ function renderDecisionNode(
   // Header with decision info
   const symbol = getColoredSymbol(node.state, colors);
   const name = node.name ?? "decision";
-  const condition = node.condition 
+  const condition = node.condition
     ? dim(` (${node.condition})`)
     : "";
   const decisionValue = node.decisionValue !== undefined
@@ -348,8 +544,8 @@ function renderDecisionNode(
   for (let i = 0; i < node.branches.length; i++) {
     const branch = node.branches[i];
     const isLast = i === node.branches.length - 1;
-    const prefix = isLast 
-      ? `${indent}${BOX.vertical} ${BOX.bottomLeft}` 
+    const prefix = isLast
+      ? `${indent}${BOX.vertical} ${BOX.bottomLeft}`
       : `${indent}${BOX.vertical} ${BOX.teeRight}`;
 
     // Branch label with taken/skipped indicator
@@ -367,7 +563,7 @@ function renderDecisionNode(
 
     // Render children of this branch
     if (branch.children.length > 0) {
-      const childLines = renderNodes(branch.children, options, colors, depth + 1);
+      const childLines = renderNodes(branch.children, options, colors, depth + 1, hooks);
       for (const line of childLines) {
         lines.push(`${indent}${BOX.vertical}   ${line}`);
       }

@@ -22,6 +22,10 @@ import type {
   DecisionBranchEvent,
   DecisionEndEvent,
   DecisionBranch,
+  IRSnapshot,
+  ActiveStepSnapshot,
+  WorkflowHooks,
+  HookExecution,
 } from "./types";
 import { generateId } from "./utils/timing";
 import { detectParallelGroups, type ParallelDetectorOptions } from "./parallel-detector";
@@ -45,6 +49,20 @@ export interface IRBuilderOptions {
    * Options for parallel detection.
    */
   parallelDetection?: ParallelDetectorOptions;
+
+  /**
+   * Enable snapshot recording for time-travel debugging.
+   * When true, the builder captures IR state after each event.
+   * Default: false
+   */
+  enableSnapshots?: boolean;
+
+  /**
+   * Maximum number of snapshots to keep (ring buffer behavior).
+   * When exceeded, oldest snapshots are discarded.
+   * Default: 1000
+   */
+  maxSnapshots?: number;
 }
 
 // =============================================================================
@@ -87,7 +105,12 @@ interface ActiveDecision {
  * Creates an IR builder that processes workflow events.
  */
 export function createIRBuilder(options: IRBuilderOptions = {}) {
-  const { detectParallel = true, parallelDetection } = options;
+  const {
+    detectParallel = true,
+    parallelDetection,
+    enableSnapshots = false,
+    maxSnapshots = 1000,
+  } = options;
 
   // Current workflow state
   let workflowId: string | undefined;
@@ -111,6 +134,15 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
   // Metadata
   let createdAt = Date.now();
   let lastUpdatedAt = createdAt;
+
+  // Hook executions
+  let hookState: WorkflowHooks = {
+    onAfterStep: new Map(),
+  };
+
+  // Snapshot state for time-travel debugging
+  const snapshots: IRSnapshot[] = [];
+  let eventIndex = 0;
 
   /**
    * Get the step ID from an event.
@@ -158,6 +190,49 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
   }
 
   /**
+   * Capture a snapshot of the current IR state (for time-travel debugging).
+   * Called after each event is processed.
+   */
+  function captureSnapshot(event: WorkflowEvent<unknown>): void {
+    if (!enableSnapshots) return;
+
+    // Deep clone the current IR state
+    const ir = getIR();
+
+    // Clone active steps for debugging
+    const activeStepsCopy = new Map<string, ActiveStepSnapshot>();
+    for (const [id, step] of activeSteps) {
+      activeStepsCopy.set(id, {
+        id: step.id,
+        name: step.name,
+        key: step.key,
+        startTs: step.startTs,
+        retryCount: step.retryCount,
+        timedOut: step.timedOut,
+        timeoutMs: step.timeoutMs,
+      });
+    }
+
+    const snapshot: IRSnapshot = {
+      id: `snapshot_${eventIndex}`,
+      eventIndex,
+      event: structuredClone(event),
+      ir: structuredClone(ir),
+      timestamp: Date.now(),
+      activeSteps: activeStepsCopy,
+    };
+
+    snapshots.push(snapshot);
+
+    // Ring buffer: remove oldest if we exceed max
+    if (snapshots.length > maxSnapshots) {
+      snapshots.shift();
+    }
+
+    eventIndex++;
+  }
+
+  /**
    * Handle a workflow event and update the IR.
    */
   function handleEvent(event: WorkflowEvent<unknown>): void {
@@ -168,6 +243,10 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
         workflowState = "running";
         createdAt = Date.now();
         lastUpdatedAt = createdAt;
+        // Note: Don't clear hookState here - shouldRun and onBeforeStart
+        // events are emitted BEFORE workflow_start. Only clear onAfterStep
+        // since those are per-step and should reset for each workflow run.
+        hookState.onAfterStep = new Map();
         break;
 
       case "workflow_success":
@@ -335,7 +414,100 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
         addNode(node);
         break;
       }
+
+      // Hook events
+      case "hook_should_run": {
+        const hookExec: HookExecution = {
+          type: "shouldRun",
+          state: "success",
+          ts: event.ts,
+          durationMs: event.durationMs,
+          context: {
+            result: event.result,
+            skipped: event.skipped,
+          },
+        };
+        hookState.shouldRun = hookExec;
+        lastUpdatedAt = Date.now();
+        break;
+      }
+
+      case "hook_should_run_error": {
+        const hookExec: HookExecution = {
+          type: "shouldRun",
+          state: "error",
+          ts: event.ts,
+          durationMs: event.durationMs,
+          error: event.error,
+        };
+        hookState.shouldRun = hookExec;
+        lastUpdatedAt = Date.now();
+        break;
+      }
+
+      case "hook_before_start": {
+        const hookExec: HookExecution = {
+          type: "onBeforeStart",
+          state: "success",
+          ts: event.ts,
+          durationMs: event.durationMs,
+          context: {
+            result: event.result,
+            skipped: event.skipped,
+          },
+        };
+        hookState.onBeforeStart = hookExec;
+        lastUpdatedAt = Date.now();
+        break;
+      }
+
+      case "hook_before_start_error": {
+        const hookExec: HookExecution = {
+          type: "onBeforeStart",
+          state: "error",
+          ts: event.ts,
+          durationMs: event.durationMs,
+          error: event.error,
+        };
+        hookState.onBeforeStart = hookExec;
+        lastUpdatedAt = Date.now();
+        break;
+      }
+
+      case "hook_after_step": {
+        const hookExec: HookExecution = {
+          type: "onAfterStep",
+          state: "success",
+          ts: event.ts,
+          durationMs: event.durationMs,
+          context: {
+            stepKey: event.stepKey,
+          },
+        };
+        hookState.onAfterStep.set(event.stepKey, hookExec);
+        lastUpdatedAt = Date.now();
+        break;
+      }
+
+      case "hook_after_step_error": {
+        const hookExec: HookExecution = {
+          type: "onAfterStep",
+          state: "error",
+          ts: event.ts,
+          durationMs: event.durationMs,
+          error: event.error,
+          context: {
+            stepKey: event.stepKey,
+          },
+        };
+        hookState.onAfterStep.set(event.stepKey, hookExec);
+        lastUpdatedAt = Date.now();
+        break;
+      }
     }
+
+    // Capture snapshot after processing event (for time-travel)
+    captureSnapshot(event);
   }
 
   /**
@@ -510,12 +682,19 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
       error: workflowError,
     };
 
+    // Include hooks if any have been recorded
+    const hasHooks =
+      hookState.shouldRun !== undefined ||
+      hookState.onBeforeStart !== undefined ||
+      hookState.onAfterStep.size > 0;
+
     return {
       root,
       metadata: {
         createdAt,
         lastUpdatedAt,
       },
+      ...(hasHooks && { hooks: hookState }),
     };
   }
 
@@ -534,6 +713,42 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
     currentNodes = [];
     createdAt = Date.now();
     lastUpdatedAt = createdAt;
+    // Clear hooks
+    hookState = {
+      onAfterStep: new Map(),
+    };
+    // Clear snapshots
+    snapshots.length = 0;
+    eventIndex = 0;
+  }
+
+  /**
+   * Get all recorded snapshots.
+   */
+  function getSnapshots(): IRSnapshot[] {
+    return [...snapshots];
+  }
+
+  /**
+   * Get a snapshot at a specific index.
+   */
+  function getSnapshotAt(index: number): IRSnapshot | undefined {
+    return snapshots[index];
+  }
+
+  /**
+   * Get the IR state at a specific snapshot index.
+   */
+  function getIRAt(index: number): WorkflowIR | undefined {
+    return snapshots[index]?.ir;
+  }
+
+  /**
+   * Clear all recorded snapshots.
+   */
+  function clearSnapshots(): void {
+    snapshots.length = 0;
+    eventIndex = 0;
   }
 
   return {
@@ -542,6 +757,11 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
     handleDecisionEvent,
     getIR,
     reset,
+    // Snapshot methods for time-travel
+    getSnapshots,
+    getSnapshotAt,
+    getIRAt,
+    clearSnapshots,
     /** Check if there are active (running) steps */
     get hasActiveSteps() {
       return activeSteps.size > 0;
@@ -549,6 +769,14 @@ export function createIRBuilder(options: IRBuilderOptions = {}) {
     /** Get the current workflow state */
     get state() {
       return workflowState;
+    },
+    /** Get the number of recorded snapshots */
+    get snapshotCount() {
+      return snapshots.length;
+    },
+    /** Check if snapshot recording is enabled */
+    get snapshotsEnabled() {
+      return enableSnapshots;
     },
   };
 }

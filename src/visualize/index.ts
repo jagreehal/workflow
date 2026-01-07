@@ -42,9 +42,33 @@ import { asciiRenderer, mermaidRenderer, defaultColorScheme } from "./renderers"
 export * from "./types";
 export { createIRBuilder, type IRBuilderOptions } from "./ir-builder";
 export { asciiRenderer, mermaidRenderer, defaultColorScheme } from "./renderers";
+export { htmlRenderer, renderToHTML } from "./renderers/html";
 export { detectParallelGroups, createParallelDetector, type ParallelDetectorOptions } from "./parallel-detector";
 export { createLiveVisualizer, type LiveVisualizer } from "./live-visualizer";
 export { trackDecision, trackIf, trackSwitch, type DecisionTracker, type IfTracker, type SwitchTracker } from "./decision-tracker";
+
+// Time-travel debugging
+export {
+  createTimeTravelController,
+  type TimeTravelController,
+  type TimeTravelOptions,
+} from "./time-travel";
+
+// Performance analysis
+export {
+  createPerformanceAnalyzer,
+  getHeatLevel,
+  type PerformanceAnalyzer,
+  type WorkflowRun,
+} from "./performance-analyzer";
+
+// Dev server (WebSocket-based live visualization)
+// Note: ws is an optional peer dependency
+export {
+  createDevServer,
+  type DevServer,
+  type DevServerOptions,
+} from "./dev-server";
 
 // =============================================================================
 // Visualizer Interface

@@ -296,6 +296,36 @@ export type WorkflowOptions<E, C = void> = {
   cache?: StepCache;
   /** Pre-populate cache from saved state for workflow resume */
   resumeState?: ResumeState | (() => ResumeState | Promise<ResumeState>);
+  /**
+   * Hook called before workflow execution starts.
+   * Return `false` to skip workflow execution (useful for distributed locking, queue checking).
+   * @param workflowId - Unique ID for this workflow run
+   * @param context - Context object from createContext (or void if not provided)
+   * @returns `true` to proceed, `false` to skip workflow execution
+   */
+  onBeforeStart?: (workflowId: string, context: C) => boolean | Promise<boolean>;
+  /**
+   * Hook called after each step completes (only for steps with a `key`).
+   * Useful for checkpointing to external systems (queues, streams, databases).
+   * @param stepKey - The key of the completed step
+   * @param result - The step's result (success or error)
+   * @param workflowId - Unique ID for this workflow run
+   * @param context - Context object from createContext (or void if not provided)
+   */
+  onAfterStep?: (
+    stepKey: string,
+    result: Result<unknown, unknown, unknown>,
+    workflowId: string,
+    context: C
+  ) => void | Promise<void>;
+  /**
+   * Hook to check if workflow should run (concurrency control).
+   * Called before onBeforeStart. Return `false` to skip workflow execution.
+   * @param workflowId - Unique ID for this workflow run
+   * @param context - Context object from createContext (or void if not provided)
+   * @returns `true` to proceed, `false` to skip workflow execution
+   */
+  shouldRun?: (workflowId: string, context: C) => boolean | Promise<boolean>;
   catchUnexpected?: never;  // prevent footgun: can't use without strict: true
   strict?: false;           // default
 };
@@ -316,6 +346,36 @@ export type WorkflowOptionsStrict<E, U, C = void> = {
   cache?: StepCache;
   /** Pre-populate cache from saved state for workflow resume */
   resumeState?: ResumeState | (() => ResumeState | Promise<ResumeState>);
+  /**
+   * Hook called before workflow execution starts.
+   * Return `false` to skip workflow execution (useful for distributed locking, queue checking).
+   * @param workflowId - Unique ID for this workflow run
+   * @param context - Context object from createContext (or void if not provided)
+   * @returns `true` to proceed, `false` to skip workflow execution
+   */
+  onBeforeStart?: (workflowId: string, context: C) => boolean | Promise<boolean>;
+  /**
+   * Hook called after each step completes (only for steps with a `key`).
+   * Useful for checkpointing to external systems (queues, streams, databases).
+   * @param stepKey - The key of the completed step
+   * @param result - The step's result (success or error)
+   * @param workflowId - Unique ID for this workflow run
+   * @param context - Context object from createContext (or void if not provided)
+   */
+  onAfterStep?: (
+    stepKey: string,
+    result: Result<unknown, unknown, unknown>,
+    workflowId: string,
+    context: C
+  ) => void | Promise<void>;
+  /**
+   * Hook to check if workflow should run (concurrency control).
+   * Called before onBeforeStart. Return `false` to skip workflow execution.
+   * @param workflowId - Unique ID for this workflow run
+   * @param context - Context object from createContext (or void if not provided)
+   * @returns `true` to proceed, `false` to skip workflow execution
+   */
+  shouldRun?: (workflowId: string, context: C) => boolean | Promise<boolean>;
 };
 
 /**
@@ -607,6 +667,136 @@ export function createWorkflow<
       (options as any)?.onEvent?.(event, context);
     };
 
+    // Check shouldRun hook (concurrency control) - called first
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const shouldRunHook = (options as any)?.shouldRun as
+      | ((workflowId: string, context: C) => boolean | Promise<boolean>)
+      | undefined;
+
+    // Get catchUnexpected for strict mode skip handling
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const catchUnexpected = (options as any)?.catchUnexpected as
+      | ((cause: unknown) => U)
+      | undefined;
+
+    if (shouldRunHook) {
+      const hookStartTime = performance.now();
+      try {
+        const shouldRunResult = await shouldRunHook(workflowId, context);
+        const hookDuration = performance.now() - hookStartTime;
+        // Emit hook event
+        emitEvent({
+          type: "hook_should_run",
+          workflowId,
+          ts: Date.now(),
+          durationMs: hookDuration,
+          result: shouldRunResult,
+          skipped: !shouldRunResult,
+        });
+        if (!shouldRunResult) {
+          // Workflow skipped - in strict mode, run through catchUnexpected
+          const skipCause = new Error("Workflow skipped by shouldRun hook");
+          if (catchUnexpected) {
+            const mappedError = catchUnexpected(skipCause);
+            return err(mappedError) as Result<T, E | U | UnexpectedError, unknown>;
+          }
+          const skipError: UnexpectedError = {
+            type: "UNEXPECTED_ERROR",
+            cause: {
+              type: "UNCAUGHT_EXCEPTION",
+              thrown: skipCause,
+            },
+          };
+          return err(skipError) as Result<T, E | U | UnexpectedError, unknown>;
+        }
+      } catch (thrown) {
+        const hookDuration = performance.now() - hookStartTime;
+        // Emit hook error event
+        emitEvent({
+          type: "hook_should_run_error",
+          workflowId,
+          ts: Date.now(),
+          durationMs: hookDuration,
+          error: thrown as E,
+        });
+        // Hook threw - wrap in Result to maintain "always returns Result" contract
+        if (catchUnexpected) {
+          const mappedError = catchUnexpected(thrown);
+          return err(mappedError) as Result<T, E | U | UnexpectedError, unknown>;
+        }
+        const hookError: UnexpectedError = {
+          type: "UNEXPECTED_ERROR",
+          cause: {
+            type: "UNCAUGHT_EXCEPTION",
+            thrown,
+          },
+        };
+        return err(hookError) as Result<T, E | U | UnexpectedError, unknown>;
+      }
+    }
+
+    // Check onBeforeStart hook (distributed locking/queue checking)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const onBeforeStartHook = (options as any)?.onBeforeStart as
+      | ((workflowId: string, context: C) => boolean | Promise<boolean>)
+      | undefined;
+
+    if (onBeforeStartHook) {
+      const hookStartTime = performance.now();
+      try {
+        const beforeStartResult = await onBeforeStartHook(workflowId, context);
+        const hookDuration = performance.now() - hookStartTime;
+        // Emit hook event
+        emitEvent({
+          type: "hook_before_start",
+          workflowId,
+          ts: Date.now(),
+          durationMs: hookDuration,
+          result: beforeStartResult,
+          skipped: !beforeStartResult,
+        });
+        if (!beforeStartResult) {
+          // Workflow skipped - in strict mode, run through catchUnexpected
+          const skipCause = new Error("Workflow skipped by onBeforeStart hook");
+          if (catchUnexpected) {
+            const mappedError = catchUnexpected(skipCause);
+            return err(mappedError) as Result<T, E | U | UnexpectedError, unknown>;
+          }
+          const skipError: UnexpectedError = {
+            type: "UNEXPECTED_ERROR",
+            cause: {
+              type: "UNCAUGHT_EXCEPTION",
+              thrown: skipCause,
+            },
+          };
+          return err(skipError) as Result<T, E | U | UnexpectedError, unknown>;
+        }
+      } catch (thrown) {
+        const hookDuration = performance.now() - hookStartTime;
+        // Emit hook error event
+        emitEvent({
+          type: "hook_before_start_error",
+          workflowId,
+          ts: Date.now(),
+          durationMs: hookDuration,
+          error: thrown as E,
+        });
+        // Hook threw - wrap in Result to maintain "always returns Result" contract
+        if (catchUnexpected) {
+          const mappedError = catchUnexpected(thrown);
+          return err(mappedError) as Result<T, E | U | UnexpectedError, unknown>;
+        }
+        const hookError: UnexpectedError = {
+          type: "UNEXPECTED_ERROR",
+          cause: {
+            type: "UNCAUGHT_EXCEPTION",
+            thrown,
+          },
+        };
+        return err(hookError) as Result<T, E | U | UnexpectedError, unknown>;
+      }
+    }
+
     // Emit workflow_start
     const startTs = Date.now();
     const startTime = performance.now();
@@ -657,10 +847,54 @@ export function createWorkflow<
       return opts ?? {};
     };
 
+    // Get onAfterStep hook (needed even without cache)
+    // Extract it here so it's available in the closure for createCachedStep
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const onAfterStepHook = (options as any)?.onAfterStep as
+      | ((
+          stepKey: string,
+          result: Result<unknown, unknown, unknown>,
+          workflowId: string,
+          context: C
+        ) => void | Promise<void>)
+      | undefined;
+
+    // Helper to call onAfterStep hook with event emission
+    const callOnAfterStepHook = async (
+      stepKey: string,
+      result: Result<unknown, unknown, unknown>
+    ): Promise<void> => {
+      if (!onAfterStepHook) return;
+      const hookStartTime = performance.now();
+      try {
+        await onAfterStepHook(stepKey, result, workflowId, context);
+        const hookDuration = performance.now() - hookStartTime;
+        emitEvent({
+          type: "hook_after_step",
+          workflowId,
+          stepKey,
+          ts: Date.now(),
+          durationMs: hookDuration,
+        });
+      } catch (thrown) {
+        const hookDuration = performance.now() - hookStartTime;
+        emitEvent({
+          type: "hook_after_step_error",
+          workflowId,
+          stepKey,
+          ts: Date.now(),
+          durationMs: hookDuration,
+          error: thrown as E,
+        });
+        // Re-throw to maintain original behavior
+        throw thrown;
+      }
+    };
+
     // Create a cached step wrapper
     const createCachedStep = (realStep: RunStep<E>): RunStep<E> => {
-      if (!cache) {
-        // No cache configured, just return real step
+      // If no cache and no onAfterStep, return real step directly
+      if (!cache && !onAfterStepHook) {
         return realStep;
       }
 
@@ -674,8 +908,8 @@ export function createWorkflow<
       ): Promise<StepT> => {
         const { name, key } = parseStepOptions(stepOptions);
 
-        // Only use cache if key is provided
-        if (key && cache.has(key)) {
+        // Only use cache if key is provided and cache exists
+        if (key && cache && cache.has(key)) {
           // Cache hit
           emitEvent({
             type: "step_cache_hit",
@@ -695,8 +929,8 @@ export function createWorkflow<
           throw createEarlyExit(cached.error as StepE, meta);
         }
 
-        // Cache miss - emit event if key was provided
-        if (key) {
+        // Cache miss - emit event only if caching is enabled
+        if (key && cache) {
           emitEvent({
             type: "step_cache_miss",
             workflowId,
@@ -715,7 +949,11 @@ export function createWorkflow<
           const value = await realStep(wrappedOp, stepOptions);
           // Cache successful result if key provided
           if (key) {
-            cache.set(key, ok(value));
+            if (cache) {
+              cache.set(key, ok(value));
+            }
+            // Call onAfterStep hook for checkpointing (even without cache)
+            await callOnAfterStepHook(key, ok(value));
           }
           return value;
         } catch (thrown) {
@@ -727,7 +965,12 @@ export function createWorkflow<
               exit.meta.origin === "result"
                 ? exit.meta.resultCause
                 : exit.meta.thrown;
-            cache.set(key, encodeCachedError(exit.error, exit.meta, originalCause));
+            const errorResult = encodeCachedError(exit.error, exit.meta, originalCause);
+            if (cache) {
+              cache.set(key, errorResult);
+            }
+            // Call onAfterStep hook for checkpointing (even on error, even without cache)
+            await callOnAfterStepHook(key, errorResult);
           }
           throw thrown;
         }
@@ -742,8 +985,8 @@ export function createWorkflow<
       ): Promise<StepT> => {
         const { name, key } = opts;
 
-        // Only use cache if key is provided
-        if (key && cache.has(key)) {
+        // Only use cache if key is provided and cache exists
+        if (key && cache && cache.has(key)) {
           // Cache hit
           emitEvent({
             type: "step_cache_hit",
@@ -763,8 +1006,8 @@ export function createWorkflow<
           throw createEarlyExit(cached.error as Err, meta);
         }
 
-        // Cache miss - emit event if key was provided
-        if (key) {
+        // Cache miss - emit event only if caching is enabled
+        if (key && cache) {
           emitEvent({
             type: "step_cache_miss",
             workflowId,
@@ -779,7 +1022,11 @@ export function createWorkflow<
           const value = await realStep.try(operation, opts);
           // Cache successful result if key provided
           if (key) {
-            cache.set(key, ok(value));
+            if (cache) {
+              cache.set(key, ok(value));
+            }
+            // Call onAfterStep hook for checkpointing (even without cache)
+            await callOnAfterStepHook(key, ok(value));
           }
           return value;
         } catch (thrown) {
@@ -791,7 +1038,12 @@ export function createWorkflow<
               exit.meta.origin === "result"
                 ? exit.meta.resultCause
                 : exit.meta.thrown;
-            cache.set(key, encodeCachedError(exit.error, exit.meta, originalCause));
+            const errorResult = encodeCachedError(exit.error, exit.meta, originalCause);
+            if (cache) {
+              cache.set(key, errorResult);
+            }
+            // Call onAfterStep hook for checkpointing (even on error, even without cache)
+            await callOnAfterStepHook(key, errorResult);
           }
           throw thrown;
         }
@@ -806,8 +1058,8 @@ export function createWorkflow<
       ): Promise<StepT> => {
         const { name, key } = opts;
 
-        // Only use cache if key is provided
-        if (key && cache.has(key)) {
+        // Only use cache if key is provided and cache exists
+        if (key && cache && cache.has(key)) {
           // Cache hit
           emitEvent({
             type: "step_cache_hit",
@@ -826,8 +1078,8 @@ export function createWorkflow<
           throw createEarlyExit(cached.error as Err, meta);
         }
 
-        // Cache miss - emit event if key was provided
-        if (key) {
+        // Cache miss - emit event only if caching is enabled
+        if (key && cache) {
           emitEvent({
             type: "step_cache_miss",
             workflowId,
@@ -842,7 +1094,11 @@ export function createWorkflow<
           const value = await realStep.fromResult(operation, opts);
           // Cache successful result if key provided
           if (key) {
-            cache.set(key, ok(value));
+            if (cache) {
+              cache.set(key, ok(value));
+            }
+            // Call onAfterStep hook for checkpointing (even without cache)
+            await callOnAfterStepHook(key, ok(value));
           }
           return value;
         } catch (thrown) {
@@ -853,7 +1109,12 @@ export function createWorkflow<
               exit.meta.origin === "result"
                 ? exit.meta.resultCause
                 : exit.meta.thrown;
-            cache.set(key, encodeCachedError(exit.error, exit.meta, originalCause));
+            const errorResult = encodeCachedError(exit.error, exit.meta, originalCause);
+            if (cache) {
+              cache.set(key, errorResult);
+            }
+            // Call onAfterStep hook for checkpointing (even on error, even without cache)
+            await callOnAfterStepHook(key, errorResult);
           }
           throw thrown;
         }

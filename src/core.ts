@@ -548,26 +548,56 @@ export interface RunStep<E = unknown> {
   ) => Promise<T>;
 
   /**
-   * Execute a parallel operation (allAsync) with scope events for visualization.
+   * Execute parallel operations with scope events for visualization.
    *
-   * This wraps the operation with scope_start and scope_end events, enabling
+   * This wraps the operations with scope_start and scope_end events, enabling
    * visualization of parallel execution branches.
    *
-   * @param name - Name for this parallel block (used in visualization)
-   * @param operation - A function that returns a Result from allAsync or allSettledAsync
-   * @returns The success value (unwrapped array)
+   * @overload Named object form - returns typed object with named results
+   * @overload Array form - wraps allAsync result with scope events
    *
-   * @example
+   * @example Named object form
+   * ```typescript
+   * const { user, posts } = await step.parallel({
+   *   user: () => fetchUser(id),
+   *   posts: () => fetchPosts(id),
+   * }, { name: 'Fetch user data' });
+   * ```
+   *
+   * @example Array form
    * ```typescript
    * const [user, posts] = await step.parallel('Fetch all data', () =>
    *   allAsync([fetchUser(id), fetchPosts(id)])
    * );
    * ```
    */
-  parallel: <T, StepE extends E, StepC = unknown>(
-    name: string,
-    operation: () => Result<T[], StepE, StepC> | AsyncResult<T[], StepE, StepC>
-  ) => Promise<T[]>;
+  parallel: {
+    // Named object form - each operation is executed in parallel
+    // Error types are constrained to extend E for type safety
+    <
+      TOperations extends Record<
+        string,
+        () => MaybeAsyncResult<unknown, E, unknown>
+      >
+    >(
+      operations: TOperations,
+      options?: { name?: string }
+    ): Promise<{
+      [K in keyof TOperations]: TOperations[K] extends () => MaybeAsyncResult<
+        infer V,
+        E,
+        unknown
+      >
+        ? V
+        : never;
+    }>;
+
+    // Array form - wraps allAsync with scope events
+    <T, StepE extends E, StepC = unknown>(
+      name: string,
+      operation: () => Result<T[], StepE, StepC> | AsyncResult<T[], StepE, StepC>
+    ): Promise<T[]>;
+  };
 
   /**
    * Execute a race operation (anyAsync) with scope events for visualization.
@@ -682,6 +712,7 @@ export interface RunStep<E = unknown> {
       | ((signal: AbortSignal) => Result<T, StepE, StepC> | AsyncResult<T, StepE, StepC>),
     options: TimeoutOptions & { name?: string; key?: string }
   ) => Promise<T>;
+
 }
 
 // =============================================================================
@@ -749,6 +780,52 @@ export type WorkflowEvent<E> =
       ts: number;
       timeoutMs: number;
       attempt?: number;
+    }
+  // Hook events
+  | {
+      type: "hook_should_run";
+      workflowId: string;
+      ts: number;
+      durationMs: number;
+      result: boolean;
+      skipped: boolean;
+    }
+  | {
+      type: "hook_should_run_error";
+      workflowId: string;
+      ts: number;
+      durationMs: number;
+      error: E;
+    }
+  | {
+      type: "hook_before_start";
+      workflowId: string;
+      ts: number;
+      durationMs: number;
+      result: boolean;
+      skipped: boolean;
+    }
+  | {
+      type: "hook_before_start_error";
+      workflowId: string;
+      ts: number;
+      durationMs: number;
+      error: E;
+    }
+  | {
+      type: "hook_after_step";
+      workflowId: string;
+      stepKey: string;
+      ts: number;
+      durationMs: number;
+    }
+  | {
+      type: "hook_after_step_error";
+      workflowId: string;
+      stepKey: string;
+      ts: number;
+      durationMs: number;
+      error: E;
     };
 
 // =============================================================================
@@ -1186,7 +1263,7 @@ export async function run<T, E, C = void>(
 
   // Track active scopes as a stack for proper nesting
   // When a step succeeds, only the innermost race scope gets the winner
-  const activeScopeStack: Array<{ scopeId: string; type: "race" | "parallel" | "allSettled"; winnerId?: string }> = [];
+  const activeScopeStack: Array<{ scopeId: string; type: ScopeType; winnerId?: string }> = [];
 
   // Counter for generating unique step IDs
   let stepIdCounter = 0;
@@ -1884,11 +1961,30 @@ export async function run<T, E, C = void>(
       );
     };
 
-    // step.parallel: Execute a parallel operation with scope events
-    stepFn.parallel = <T, StepE, StepC>(
+    // step.parallel: Execute parallel operations with scope events
+    // Supports two overloads:
+    // 1. Named object form: step.parallel({ user: () => fetchUser(id) }, { name: 'Fetch' })
+    // 2. Array form: step.parallel('name', () => allAsync([...]))
+    stepFn.parallel = ((...args: unknown[]): Promise<unknown> => {
+      // Detect which overload is being used
+      if (typeof args[0] === "string") {
+        // Array form: step.parallel(name, operation)
+        const name = args[0] as string;
+        const operation = args[1] as () => MaybeAsyncResult<unknown[], unknown, unknown>;
+        return executeParallelArray(name, operation);
+      } else {
+        // Named object form: step.parallel({ key: fn }, { name? })
+        const operations = args[0] as Record<string, () => MaybeAsyncResult<unknown, unknown, unknown>>;
+        const options = (args[1] as { name?: string } | undefined) ?? {};
+        return executeParallelNamed(operations, options);
+      }
+    }) as RunStep<E>["parallel"];
+
+    // Array form implementation
+    function executeParallelArray<T>(
       name: string,
-      operation: () => Result<T[], StepE, StepC> | AsyncResult<T[], StepE, StepC>
-    ): Promise<T[]> => {
+      operation: () => MaybeAsyncResult<T[], unknown, unknown>
+    ): Promise<T[]> {
       const scopeId = `scope_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
       return (async () => {
@@ -1945,7 +2041,114 @@ export async function run<T, E, C = void>(
           throw error;
         }
       })();
-    };
+    }
+
+    // Named object form implementation - execute each operation in parallel
+    function executeParallelNamed<T extends Record<string, unknown>>(
+      operations: Record<string, () => MaybeAsyncResult<unknown, unknown, unknown>>,
+      options: { name?: string }
+    ): Promise<T> {
+      const keys = Object.keys(operations);
+      const name = options.name ?? `Parallel(${keys.join(", ")})`;
+      const scopeId = `scope_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      return (async () => {
+        const startTime = performance.now();
+        let scopeEnded = false;
+
+        // Push this scope onto the stack for proper nesting tracking
+        activeScopeStack.push({ scopeId, type: "parallel" });
+
+        // Helper to emit scope_end exactly once
+        const emitScopeEnd = () => {
+          if (scopeEnded) return;
+          scopeEnded = true;
+          const idx = activeScopeStack.findIndex(s => s.scopeId === scopeId);
+          if (idx !== -1) activeScopeStack.splice(idx, 1);
+          emitEvent({
+            type: "scope_end",
+            workflowId,
+            scopeId,
+            ts: Date.now(),
+            durationMs: performance.now() - startTime,
+          });
+        };
+
+        // Emit scope_start event with operation names in metadata
+        emitEvent({
+          type: "scope_start",
+          workflowId,
+          scopeId,
+          scopeType: "parallel",
+          name,
+          ts: Date.now(),
+        });
+
+        try {
+          // Execute all operations in parallel, fail-fast on first error
+          const results = await new Promise<{ key: string; result: Result<unknown, unknown, unknown> }[]>((resolve) => {
+            if (keys.length === 0) {
+              resolve([]);
+              return;
+            }
+
+            let settled = false;
+            let pendingCount = keys.length;
+            const resultArray: { key: string; result: Result<unknown, unknown, unknown> }[] = new Array(keys.length);
+
+            for (let i = 0; i < keys.length; i++) {
+              const key = keys[i];
+              const index = i;
+
+              Promise.resolve(operations[key]())
+                .catch((reason) => err(
+                  { type: "PROMISE_REJECTED" as const, cause: reason },
+                  { cause: { type: "PROMISE_REJECTION" as const, reason } }
+                ))
+                .then((result) => {
+                  if (settled) return;
+
+                  // Fail-fast: if any operation fails, resolve immediately with just the failed entry
+                  if (!result.ok) {
+                    settled = true;
+                    resolve([{ key, result }]);
+                    return;
+                  }
+
+                  resultArray[index] = { key, result };
+                  pendingCount--;
+
+                  if (pendingCount === 0) {
+                    resolve(resultArray);
+                  }
+                });
+            }
+          });
+
+          // Emit scope_end before processing results
+          emitScopeEnd();
+
+          // Check for errors and build result object
+          const output: Record<string, unknown> = {};
+          for (const { key, result } of results) {
+            if (!result.ok) {
+              onError?.(result.error as unknown as E, key);
+              throw earlyExit(result.error as unknown as E, {
+                origin: "result",
+                resultCause: result.cause,
+              });
+            }
+            output[key] = result.value;
+          }
+
+          return output as T;
+        } catch (error) {
+          // Always emit scope_end in finally-like fashion
+          emitScopeEnd();
+          throw error;
+        }
+      })();
+    }
 
     // step.race: Execute a race operation with scope events
     stepFn.race = <T, StepE, StepC>(

@@ -19,6 +19,7 @@ import {
   ErrorOf,
   createWorkflow,
   ErrorsOfDeps,
+  allAsync,
 } from "./index";
 
 // =============================================================================
@@ -740,5 +741,108 @@ async function _test30RunStrictCauseIsUnknown() {
     // Even in strict mode, cause is unknown because catchUnexpected
     // receives thrown values which have unknown type
     expectType<unknown>(result.cause);
+  }
+}
+
+// =============================================================================
+// TEST 31: step.parallel() named object form type inference
+// =============================================================================
+
+async function _test31ParallelNamedObjectTypeInference() {
+  type User = { id: string; name: string };
+  type Post = { id: string; title: string };
+  type Comment = { id: string; text: string };
+
+  const fetchUser = (id: string): AsyncResult<User, "NOT_FOUND"> =>
+    Promise.resolve(ok({ id, name: `User ${id}` }));
+
+  const fetchPosts = (userId: string): AsyncResult<Post[], "FETCH_ERROR"> =>
+    Promise.resolve(ok([{ id: "p1", title: `Post by ${userId}` }]));
+
+  const fetchComments = (postId: string): AsyncResult<Comment[], "COMMENTS_ERROR"> =>
+    Promise.resolve(ok([{ id: "c1", text: `Comment on ${postId}` }]));
+
+  await run(async (step) => {
+    // Named object form should infer typed results
+    const result = await step.parallel({
+      user: () => fetchUser("1"),
+      posts: () => fetchPosts("1"),
+      comments: () => fetchComments("p1"),
+    });
+
+    // Each key should have the correct type inferred
+    expectType<User>(result.user);
+    expectType<Post[]>(result.posts);
+    expectType<Comment[]>(result.comments);
+
+    return result;
+  });
+}
+
+// =============================================================================
+// TEST 32: step.parallel() named object with options
+// =============================================================================
+
+async function _test32ParallelNamedObjectWithOptions() {
+  type User = { id: string; name: string };
+  type Post = { id: string; title: string };
+
+  const fetchUser = (id: string): AsyncResult<User, "NOT_FOUND"> =>
+    Promise.resolve(ok({ id, name: `User ${id}` }));
+
+  const fetchPosts = (userId: string): AsyncResult<Post[], "FETCH_ERROR"> =>
+    Promise.resolve(ok([{ id: "p1", title: `Post by ${userId}` }]));
+
+  await run(async (step) => {
+    // Should accept options parameter
+    const result = await step.parallel(
+      {
+        user: () => fetchUser("1"),
+        posts: () => fetchPosts("1"),
+      },
+      { name: "Fetch user data" }
+    );
+
+    expectType<User>(result.user);
+    expectType<Post[]>(result.posts);
+
+    return result;
+  });
+}
+
+// =============================================================================
+// TEST 33: step.parallel() with createWorkflow preserves error types
+// =============================================================================
+
+async function _test36ParallelWithCreateWorkflow() {
+  type User = { id: string; name: string };
+  type Post = { id: string; title: string };
+
+  const fetchUser = (id: string): AsyncResult<User, "NOT_FOUND"> =>
+    Promise.resolve(ok({ id, name: `User ${id}` }));
+
+  const fetchPosts = (userId: string): AsyncResult<Post[], "FETCH_ERROR"> =>
+    Promise.resolve(ok([{ id: "p1", title: `Post by ${userId}` }]));
+
+  // createWorkflow should infer error union from deps
+  const workflow = createWorkflow({ fetchUser, fetchPosts });
+
+  const result = await workflow(async (step, { fetchUser, fetchPosts }) => {
+    // Named object parallel should work within createWorkflow
+    const { user, posts } = await step.parallel({
+      user: () => fetchUser("1"),
+      posts: () => fetchPosts("1"),
+    });
+
+    expectType<User>(user);
+    expectType<Post[]>(posts);
+
+    return { user, posts };
+  });
+
+  // Error type should be inferred from deps
+  if (!result.ok) {
+    // Error should be "NOT_FOUND" | "FETCH_ERROR" | UnexpectedError
+    expectType<"NOT_FOUND" | "FETCH_ERROR" | UnexpectedError>(result.error);
   }
 }

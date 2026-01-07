@@ -173,6 +173,8 @@ export interface WorkflowIR {
     /** When the IR was last updated */
     lastUpdatedAt: number;
   };
+  /** Hook executions (if any hooks are configured) */
+  hooks?: WorkflowHooks;
 }
 
 // =============================================================================
@@ -410,4 +412,247 @@ export function hasChildren(
   node: FlowNode
 ): node is SequenceNode | ParallelNode | RaceNode | DecisionNode {
   return "children" in node || (node.type === "decision" && "branches" in node);
+}
+
+// =============================================================================
+// Time Travel Types
+// =============================================================================
+
+/**
+ * Snapshot of an active step's state at a point in time.
+ */
+export interface ActiveStepSnapshot {
+  id: string;
+  name?: string;
+  key?: string;
+  startTs: number;
+  retryCount: number;
+  timedOut: boolean;
+  timeoutMs?: number;
+}
+
+/**
+ * A snapshot of the complete IR state at a specific point in time.
+ * Used for time-travel debugging - each event creates a snapshot.
+ */
+export interface IRSnapshot {
+  /** Unique identifier for this snapshot */
+  id: string;
+  /** Index in the event sequence (0-based) */
+  eventIndex: number;
+  /** The event that triggered this snapshot */
+  event: unknown; // WorkflowEvent - avoid circular import
+  /** Complete IR state at this moment */
+  ir: WorkflowIR;
+  /** Timestamp when snapshot was taken */
+  timestamp: number;
+  /** Active step states at this moment (for debugging) */
+  activeSteps: Map<string, ActiveStepSnapshot>;
+}
+
+/**
+ * State of the time-travel controller.
+ */
+export interface TimeTravelState {
+  /** All recorded snapshots */
+  snapshots: IRSnapshot[];
+  /** Current snapshot index (for playback position) */
+  currentIndex: number;
+  /** Whether playback is active */
+  isPlaying: boolean;
+  /** Playback speed multiplier (1.0 = realtime, 2.0 = 2x speed) */
+  playbackSpeed: number;
+  /** Whether recording is active */
+  isRecording: boolean;
+}
+
+// =============================================================================
+// Performance Analysis Types
+// =============================================================================
+
+/**
+ * Performance metrics for a single node across multiple runs.
+ */
+export interface NodePerformance {
+  /** Node identifier (name or step ID) */
+  nodeId: string;
+  /** Average duration across all samples */
+  avgDurationMs: number;
+  /** Minimum duration observed */
+  minDurationMs: number;
+  /** Maximum duration observed */
+  maxDurationMs: number;
+  /** Standard deviation of durations */
+  stdDevMs: number;
+  /** Number of timing samples collected */
+  samples: number;
+  /** Retry frequency (0-1, where 1 = always retries) */
+  retryRate: number;
+  /** Timeout frequency (0-1) */
+  timeoutRate: number;
+  /** Error rate (0-1) */
+  errorRate: number;
+  /** Percentile data for distribution analysis */
+  percentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+}
+
+/**
+ * Heatmap data for visualizing performance across nodes.
+ */
+export interface HeatmapData {
+  /** Map of node ID to heat level (0-1, where 1 is hottest/slowest) */
+  heat: Map<string, number>;
+  /** The metric used for heat calculation */
+  metric: "duration" | "retryRate" | "errorRate";
+  /** Statistics used to compute heat values */
+  stats: {
+    /** Minimum value in the dataset */
+    min: number;
+    /** Maximum value in the dataset */
+    max: number;
+    /** Mean value */
+    mean: number;
+    /** Threshold above which a node is considered "hot" */
+    threshold: number;
+  };
+}
+
+/**
+ * Heat level for visual styling.
+ */
+export type HeatLevel = "cold" | "cool" | "neutral" | "warm" | "hot" | "critical";
+
+// =============================================================================
+// HTML Renderer Types
+// =============================================================================
+
+/**
+ * Theme for the HTML visualizer.
+ */
+export type HTMLTheme = "light" | "dark" | "auto";
+
+/**
+ * Layout direction for the workflow diagram.
+ */
+export type LayoutDirection = "TB" | "LR" | "BT" | "RL";
+
+/**
+ * Options for the HTML renderer.
+ */
+export interface HTMLRenderOptions extends RenderOptions {
+  /** Enable interactive features (click to inspect, zoom/pan) */
+  interactive: boolean;
+  /** Include time-travel controls */
+  timeTravel: boolean;
+  /** Include performance heatmap overlay */
+  heatmap: boolean;
+  /** Animation duration for transitions (ms) */
+  animationDuration: number;
+  /** Color theme */
+  theme: HTMLTheme;
+  /** Diagram layout direction */
+  layout: LayoutDirection;
+  /** Heatmap data (if heatmap is enabled) */
+  heatmapData?: HeatmapData;
+  /** WebSocket URL for live updates (if streaming) */
+  wsUrl?: string;
+}
+
+/**
+ * Message sent from the web visualizer to the dev server.
+ */
+export interface WebVisualizerMessage {
+  type:
+    | "time_travel_seek"
+    | "time_travel_play"
+    | "time_travel_pause"
+    | "time_travel_step_forward"
+    | "time_travel_step_backward"
+    | "request_snapshots"
+    | "toggle_heatmap"
+    | "set_heatmap_metric";
+  payload?: unknown;
+}
+
+/**
+ * Message sent from the dev server to the web visualizer.
+ */
+export interface ServerMessage {
+  type:
+    | "ir_update"
+    | "snapshot"
+    | "snapshots_list"
+    | "performance_data"
+    | "workflow_complete"
+    | "time_travel_state";
+  payload: unknown;
+}
+
+// =============================================================================
+// Enhanced ASCII Renderer Types
+// =============================================================================
+
+/**
+ * Extended render options for the enhanced ASCII renderer.
+ */
+export interface EnhancedRenderOptions extends RenderOptions {
+  /** Show performance heatmap coloring */
+  showHeatmap?: boolean;
+  /** Heatmap data for coloring nodes */
+  heatmapData?: HeatmapData;
+  /** Show timing sparklines (requires historical data) */
+  showSparklines?: boolean;
+  /** Historical timing data for sparklines: nodeId → array of durations */
+  timingHistory?: Map<string, number[]>;
+}
+
+// =============================================================================
+// Hook Execution Types
+// =============================================================================
+
+/**
+ * State of a hook execution.
+ */
+export type HookState = "pending" | "running" | "success" | "error";
+
+/**
+ * Execution record for a workflow hook.
+ */
+export interface HookExecution {
+  /** Hook type identifier */
+  type: "shouldRun" | "onBeforeStart" | "onAfterStep";
+  /** Execution state */
+  state: HookState;
+  /** Timestamp when hook started */
+  ts: number;
+  /** Duration in milliseconds */
+  durationMs?: number;
+  /** Error if hook failed */
+  error?: unknown;
+  /** Additional context (e.g., stepKey for onAfterStep) */
+  context?: {
+    /** Step key for onAfterStep hooks */
+    stepKey?: string;
+    /** Result of shouldRun hook */
+    result?: boolean;
+    /** Whether workflow was skipped due to shouldRun returning false */
+    skipped?: boolean;
+  };
+}
+
+/**
+ * Hook execution summary for the workflow.
+ */
+export interface WorkflowHooks {
+  /** shouldRun hook execution (if configured) */
+  shouldRun?: HookExecution;
+  /** onBeforeStart hook execution (if configured) */
+  onBeforeStart?: HookExecution;
+  /** onAfterStep hook executions (keyed by stepKey) */
+  onAfterStep: Map<string, HookExecution>;
 }

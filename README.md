@@ -154,6 +154,102 @@ const result = await processPayment(async (step) => {
 });
 ```
 
+### 💾 Save & Resume (Persist Workflows Across Restarts)
+
+Save workflow state to a database and resume later from exactly where you left off. Perfect for long-running workflows, crash recovery, or pausing for approvals.
+
+**Step 1: Collect state during execution**
+
+```typescript
+import { createWorkflow, createStepCollector } from '@jagreehal/workflow';
+
+// Create a collector to automatically capture step results
+const collector = createStepCollector();
+
+const workflow = createWorkflow({ fetchUser, fetchPosts }, {
+  onEvent: collector.handleEvent, // Automatically collects step_complete events
+});
+
+await workflow(async (step) => {
+  // Only steps with keys are saved
+  const user = await step(() => fetchUser("1"), { key: "user:1" });
+  const posts = await step(() => fetchPosts(user.id), { key: `posts:${user.id}` });
+  return { user, posts };
+});
+
+// Get the collected state
+const state = collector.getState(); // Returns ResumeState
+```
+
+**Step 2: Save to database**
+
+```typescript
+import { stringifyState, parseState } from '@jagreehal/workflow';
+
+// Serialize to JSON
+const json = stringifyState(state, { workflowId: "123", timestamp: Date.now() });
+
+// Save to your database
+await db.workflowStates.create({
+  id: workflowId,
+  state: json,
+  createdAt: new Date(),
+});
+```
+
+**Step 3: Resume from saved state**
+
+```typescript
+// Load from database
+const saved = await db.workflowStates.findUnique({ where: { id: workflowId } });
+const savedState = parseState(saved.state);
+
+// Resume workflow - cached steps skip execution
+const workflow = createWorkflow({ fetchUser, fetchPosts }, {
+  resumeState: savedState, // Pre-populates cache from saved state
+});
+
+await workflow(async (step) => {
+  const user = await step(() => fetchUser("1"), { key: "user:1" }); // ✅ Cache hit - no fetchUser call
+  const posts = await step(() => fetchPosts(user.id), { key: `posts:${user.id}` }); // ✅ Cache hit
+  return { user, posts };
+});
+```
+
+**With database adapter (Redis, DynamoDB, etc.)**
+
+```typescript
+import { createStatePersistence } from '@jagreehal/workflow';
+import { createClient } from 'redis';
+
+const redis = createClient();
+await redis.connect();
+
+// Create persistence adapter
+const persistence = createStatePersistence({
+  get: (key) => redis.get(key),
+  set: (key, value) => redis.set(key, value),
+  delete: (key) => redis.del(key).then(n => n > 0),
+  exists: (key) => redis.exists(key).then(n => n > 0),
+  keys: (pattern) => redis.keys(pattern),
+}, 'workflow:state:');
+
+// Save
+await persistence.save(runId, state, { metadata: { userId: 'user-1' } });
+
+// Load
+const savedState = await persistence.load(runId);
+
+// Resume
+const workflow = createWorkflow(deps, { resumeState: savedState });
+```
+
+**Key points:**
+- Only steps with `key` options are saved (unkeyed steps execute fresh on resume)
+- Error results are preserved with metadata for proper replay
+- You can also pass an async function: `resumeState: async () => await loadFromDB()`
+- Works seamlessly with HITL approvals and crash recovery
+
 ### 🧑‍💻 Human-in-the-Loop
 
 Pause for manual approvals (large transfers, deployments, refunds) and resume exactly where you left off.
@@ -281,6 +377,82 @@ That's the foundation. Now let's build on it.
 
 ---
 
+## Persistence Quickstart
+
+Save workflow state to a database and resume later. Perfect for crash recovery, long-running workflows, or pausing for approvals.
+
+### Basic Save & Resume
+
+```typescript
+import { createWorkflow, createStepCollector, stringifyState, parseState } from '@jagreehal/workflow';
+
+// 1. Collect state during execution
+const collector = createStepCollector();
+const workflow = createWorkflow({ fetchUser, fetchPosts }, {
+  onEvent: collector.handleEvent,
+});
+
+await workflow(async (step) => {
+  const user = await step(() => fetchUser("1"), { key: "user:1" });
+  const posts = await step(() => fetchPosts(user.id), { key: `posts:${user.id}` });
+  return { user, posts };
+});
+
+// 2. Save to database
+const state = collector.getState();
+const json = stringifyState(state, { workflowId: "123" });
+await db.workflowStates.create({ id: "123", state: json });
+
+// 3. Resume later
+const saved = await db.workflowStates.findUnique({ where: { id: "123" } });
+const savedState = parseState(saved.state);
+
+const resumed = createWorkflow({ fetchUser, fetchPosts }, {
+  resumeState: savedState,
+});
+
+// Cached steps skip execution automatically
+await resumed(async (step) => {
+  const user = await step(() => fetchUser("1"), { key: "user:1" }); // ✅ Cache hit
+  const posts = await step(() => fetchPosts(user.id), { key: `posts:${user.id}` }); // ✅ Cache hit
+  return { user, posts };
+});
+```
+
+### With Database Adapter (Redis, DynamoDB, etc.)
+
+```typescript
+import { createStatePersistence } from '@jagreehal/workflow';
+import { createClient } from 'redis';
+
+const redis = createClient();
+await redis.connect();
+
+// Create persistence adapter
+const persistence = createStatePersistence({
+  get: (key) => redis.get(key),
+  set: (key, value) => redis.set(key, value),
+  delete: (key) => redis.del(key).then(n => n > 0),
+  exists: (key) => redis.exists(key).then(n => n > 0),
+  keys: (pattern) => redis.keys(pattern),
+}, 'workflow:state:');
+
+// Save
+const collector = createStepCollector();
+const workflow = createWorkflow(deps, { onEvent: collector.handleEvent });
+await workflow(async (step) => { /* ... */ });
+
+await persistence.save('run-123', collector.getState(), { userId: 'user-1' });
+
+// Load and resume
+const savedState = await persistence.load('run-123');
+const resumed = createWorkflow(deps, { resumeState: savedState });
+```
+
+**See the [Save & Resume](#-save--resume-persist-workflows-across-restarts) section for more details.**
+
+---
+
 ## Guided Tutorial
 
 We'll take a single workflow through four stages - from basic to production-ready. Each stage builds on the last, so you'll see how features compose naturally.
@@ -356,29 +528,37 @@ Pause long-running workflows until an operator approves, then resume using persi
 import {
   createApprovalStep,
   createWorkflow,
+  createStepCollector,
   injectApproval,
   isPendingApproval,
-  isStepComplete,
-  type ResumeStateEntry,
 } from '@jagreehal/workflow';
 
-const savedSteps = new Map<string, ResumeStateEntry>();
+// Use collector to automatically capture state
+const collector = createStepCollector();
 const requireApproval = createApprovalStep({
   key: 'approval:deploy',
   checkApproval: async () => ({ status: 'pending' }),
 });
 
 const gatedWorkflow = createWorkflow({ requireApproval }, {
-  onEvent: (event) => {
-    if (isStepComplete(event)) savedSteps.set(event.stepKey, { result: event.result, meta: event.meta });
-  },
+  onEvent: collector.handleEvent, // Automatically collects step results
 });
 
 const result = await gatedWorkflow(async (step) => step(requireApproval, { key: 'approval:deploy' }));
 
 if (!result.ok && isPendingApproval(result.error)) {
-  // later
-  injectApproval({ steps: savedSteps }, { stepKey: 'approval:deploy', value: { approvedBy: 'ops' } });
+  // Get collected state
+  const state = collector.getState();
+  
+  // Later, when approval is granted, inject it and resume
+  const updatedState = injectApproval(state, {
+    stepKey: 'approval:deploy',
+    value: { approvedBy: 'ops' },
+  });
+
+  // Resume with approval injected
+  const resumed = createWorkflow({ requireApproval }, { resumeState: updatedState });
+  await resumed(async (step) => step(requireApproval, { key: 'approval:deploy' })); // Uses injected approval
 }
 ```
 
@@ -547,15 +727,24 @@ const result = await validateAndCheckout(async (step) => {
 - **State save & resume** – Persist step completions and resume later.
 
   ```typescript
-  import { createWorkflow, isStepComplete, type ResumeStateEntry } from '@jagreehal/workflow';
+  import { createWorkflow, createStepCollector } from '@jagreehal/workflow';
 
-  const savedSteps = new Map<string, ResumeStateEntry>();
+  // Collect state during execution
+  const collector = createStepCollector();
   const workflow = createWorkflow(deps, {
-    onEvent: (event) => {
-      if (isStepComplete(event)) savedSteps.set(event.stepKey, { result: event.result, meta: event.meta });
-    },
+    onEvent: collector.handleEvent, // Automatically collects step_complete events
   });
-  const resumed = createWorkflow(deps, { resumeState: { steps: savedSteps } });
+
+  await workflow(async (step) => {
+    const user = await step(() => fetchUser("1"), { key: "user:1" });
+    return user;
+  });
+
+  // Get collected state
+  const state = collector.getState();
+
+  // Resume later
+  const resumed = createWorkflow(deps, { resumeState: state });
   ```
 
 - **Human-in-the-loop approvals** – Pause a workflow until someone approves.
@@ -605,16 +794,25 @@ const result = await validateAndCheckout(async (step) => {
   const data = map(result, ([user, posts]) => ({ user, posts }));
   ```
 
-## Real-World Example: Safe Payment Retries
+## Real-World Example: Safe Payment Retries with Persistence
 
 The scariest failure mode in payments: **charge succeeded, but persistence failed**. If you retry naively, you charge the customer twice.
 
-Step keys solve this. Once a step succeeds, it's cached - retries skip it automatically:
+Step keys + persistence solve this. Save state to a database, and if the workflow crashes, resume from the last successful step:
 
 ```typescript
+import { createWorkflow, createStepCollector, stringifyState, parseState } from '@jagreehal/workflow';
+
 const processPayment = createWorkflow({ validateCard, chargeProvider, persistResult });
 
-const result = await processPayment(async (step) => {
+// Collect state for persistence
+const collector = createStepCollector();
+const workflow = createWorkflow(
+  { validateCard, chargeProvider, persistResult },
+  { onEvent: collector.handleEvent }
+);
+
+const result = await workflow(async (step) => {
   const card = await step(() => validateCard(input), { key: 'validate' });
 
   // This is the dangerous step. Once it succeeds, never repeat it:
@@ -622,15 +820,53 @@ const result = await processPayment(async (step) => {
     key: `charge:${input.idempotencyKey}`,
   });
 
-  // If THIS fails (DB down), you can rerun the workflow later.
+  // If THIS fails (DB down), save state and rerun later.
   // The charge step is cached - it won't execute again.
   await step(() => persistResult(charge), { key: `persist:${charge.id}` });
 
   return { paymentId: charge.id };
 });
+
+// Save state after each run (or on crash)
+if (result.ok) {
+  const state = collector.getState();
+  const json = stringifyState(state, { orderId: input.orderId });
+  await db.workflowStates.upsert({
+    where: { idempotencyKey: input.idempotencyKey },
+    update: { state: json, updatedAt: new Date() },
+    create: { idempotencyKey: input.idempotencyKey, state: json },
+  });
+}
 ```
 
-Crash after charging but before persisting? Rerun the workflow. The charge step returns its cached result. No double-billing.
+**Crash recovery:** If the workflow crashes after charging but before persisting:
+
+```typescript
+// On restart, load saved state
+const saved = await db.workflowStates.findUnique({
+  where: { idempotencyKey: input.idempotencyKey },
+});
+
+if (saved) {
+  const savedState = parseState(saved.state);
+  const workflow = createWorkflow(
+    { validateCard, chargeProvider, persistResult },
+    { resumeState: savedState }
+  );
+
+  // Resume - charge step uses cached result, no double-billing!
+  const result = await workflow(async (step) => {
+    const card = await step(() => validateCard(input), { key: 'validate' }); // Cache hit
+    const charge = await step(() => chargeProvider(card), {
+      key: `charge:${input.idempotencyKey}`,
+    }); // Cache hit - returns previous charge result
+    await step(() => persistResult(charge), { key: `persist:${charge.id}` }); // Executes fresh
+    return { paymentId: charge.id };
+  });
+}
+```
+
+Crash after charging but before persisting? Resume the workflow. The charge step returns its cached result. No double-billing.
 
 ## Is This Library Right for You?
 

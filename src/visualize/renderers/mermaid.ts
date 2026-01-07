@@ -15,9 +15,13 @@ import type {
   StepNode,
   StepState,
   WorkflowIR,
+  EnhancedRenderOptions,
+  HeatLevel,
+  WorkflowHooks,
 } from "../types";
 import { isParallelNode, isRaceNode, isStepNode, isDecisionNode } from "../types";
 import { formatDuration } from "../utils/timing";
+import { getHeatLevel } from "../performance-analyzer";
 
 // =============================================================================
 // Mermaid Style Definitions
@@ -47,10 +51,96 @@ function getStyleDefinitions(): string[] {
 }
 
 /**
+ * Get Mermaid class definitions for heatmap visualization.
+ */
+function getHeatmapStyleDefinitions(): string[] {
+  return [
+    // Heatmap colors - cold to hot
+    "    classDef heat_cold fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#1e40af",
+    "    classDef heat_cool fill:#ccfbf1,stroke:#14b8a6,stroke-width:2px,color:#0f766e",
+    "    classDef heat_neutral fill:#f3f4f6,stroke:#6b7280,stroke-width:2px,color:#374151",
+    "    classDef heat_warm fill:#fef3c7,stroke:#f59e0b,stroke-width:2px,color:#92400e",
+    "    classDef heat_hot fill:#fed7aa,stroke:#f97316,stroke-width:3px,color:#c2410c",
+    "    classDef heat_critical fill:#fecaca,stroke:#ef4444,stroke-width:3px,color:#b91c1c",
+  ];
+}
+
+/**
+ * Get the Mermaid class name for a heat level.
+ */
+function getHeatClass(level: HeatLevel): string {
+  return `heat_${level}`;
+}
+
+/**
  * Get the Mermaid class name for a step state.
  */
 function getStateClass(state: StepState): string {
   return state;
+}
+
+/**
+ * Get Mermaid class definitions for hook visualization.
+ */
+function getHookStyleDefinitions(): string[] {
+  return [
+    // Hook styles - gear icon aesthetic
+    "    classDef hook_success fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e",
+    "    classDef hook_error fill:#fef2f2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d",
+  ];
+}
+
+/**
+ * Render hooks as nodes before the workflow starts.
+ * Returns the ID of the last hook node (to connect to workflow start).
+ */
+function renderHooks(
+  hooks: WorkflowHooks,
+  lines: string[],
+  options: RenderOptions
+): { lastHookId: string | undefined } {
+  let lastHookId: string | undefined;
+
+  // Render shouldRun hook
+  if (hooks.shouldRun) {
+    const hookId = "hook_shouldRun";
+    const state = hooks.shouldRun.state === "success" ? "hook_success" : "hook_error";
+    const icon = hooks.shouldRun.state === "success" ? "⚙" : "⚠";
+    const timing = options.showTimings && hooks.shouldRun.durationMs !== undefined
+      ? ` ${formatDuration(hooks.shouldRun.durationMs)}`
+      : "";
+    const context = hooks.shouldRun.context?.skipped
+      ? "\\nskipped workflow"
+      : hooks.shouldRun.context?.result === true
+        ? "\\nproceed"
+        : "";
+
+    lines.push(`    ${hookId}[["${icon} shouldRun${context}${timing}"]]:::${state}`);
+    lastHookId = hookId;
+  }
+
+  // Render onBeforeStart hook
+  if (hooks.onBeforeStart) {
+    const hookId = "hook_beforeStart";
+    const state = hooks.onBeforeStart.state === "success" ? "hook_success" : "hook_error";
+    const icon = hooks.onBeforeStart.state === "success" ? "⚙" : "⚠";
+    const timing = options.showTimings && hooks.onBeforeStart.durationMs !== undefined
+      ? ` ${formatDuration(hooks.onBeforeStart.durationMs)}`
+      : "";
+    const context = hooks.onBeforeStart.context?.skipped
+      ? "\\nskipped workflow"
+      : "";
+
+    lines.push(`    ${hookId}[["${icon} onBeforeStart${context}${timing}"]]:::${state}`);
+
+    // Connect from previous hook if exists
+    if (lastHookId) {
+      lines.push(`    ${lastHookId} --> ${hookId}`);
+    }
+    lastHookId = hookId;
+  }
+
+  return { lastHookId };
 }
 
 // =============================================================================
@@ -119,19 +209,34 @@ export function mermaidRenderer(): Renderer {
       resetNodeCounter();
       const lines: string[] = [];
 
+      // Check for enhanced options (heatmap)
+      const enhanced = options as EnhancedRenderOptions;
+
       // Diagram header
       lines.push("flowchart TD");
+
+      // Render hooks first (if any)
+      let hookExitId: string | undefined;
+      if (ir.hooks) {
+        const hookResult = renderHooks(ir.hooks, lines, options);
+        hookExitId = hookResult.lastHookId;
+      }
 
       // Start node - more visually distinctive
       const startId = "start";
       lines.push(`    ${startId}(("▶ Start"))`);
 
+      // Connect hooks to start node
+      if (hookExitId) {
+        lines.push(`    ${hookExitId} --> ${startId}`);
+      }
+
       // Track the last node for connections
       let prevNodeId = startId;
 
-      // Render children
+      // Render children (passing hooks for onAfterStep annotations)
       for (const child of ir.root.children) {
-        const result = renderNode(child, options, lines);
+        const result = renderNode(child, options, lines, enhanced, ir.hooks);
         lines.push(`    ${prevNodeId} --> ${result.entryId}`);
         prevNodeId = result.exitId;
       }
@@ -152,6 +257,16 @@ export function mermaidRenderer(): Renderer {
       lines.push("");
       lines.push(...getStyleDefinitions());
 
+      // Add heatmap styles if enabled
+      if (enhanced.showHeatmap) {
+        lines.push(...getHeatmapStyleDefinitions());
+      }
+
+      // Add hook styles if hooks were rendered
+      if (ir.hooks) {
+        lines.push(...getHookStyleDefinitions());
+      }
+
       return lines.join("\n");
     },
   };
@@ -171,16 +286,18 @@ interface RenderResult {
 function renderNode(
   node: FlowNode,
   options: RenderOptions,
-  lines: string[]
+  lines: string[],
+  enhanced?: EnhancedRenderOptions,
+  hooks?: WorkflowHooks
 ): RenderResult {
   if (isStepNode(node)) {
-    return renderStepNode(node, options, lines);
+    return renderStepNode(node, options, lines, enhanced, hooks);
   } else if (isParallelNode(node)) {
-    return renderParallelNode(node, options, lines);
+    return renderParallelNode(node, options, lines, enhanced, hooks);
   } else if (isRaceNode(node)) {
-    return renderRaceNode(node, options, lines);
+    return renderRaceNode(node, options, lines, enhanced, hooks);
   } else if (isDecisionNode(node)) {
-    return renderDecisionNode(node, options, lines);
+    return renderDecisionNode(node, options, lines, enhanced, hooks);
   }
 
   // Fallback for sequence or unknown nodes
@@ -195,14 +312,16 @@ function renderNode(
 function renderStepNode(
   node: StepNode,
   options: RenderOptions,
-  lines: string[]
+  lines: string[],
+  enhanced?: EnhancedRenderOptions,
+  hooks?: WorkflowHooks
 ): RenderResult {
   const id = node.key
     ? `step_${node.key.replace(/[^a-zA-Z0-9]/g, "_")}`
     : generateNodeId("step");
 
   const label = escapeMermaidText(node.name ?? node.key ?? "Step");
-  
+
   // Format timing - use space instead of parentheses to avoid Mermaid parse errors
   const timing =
     options.showTimings && node.durationMs !== undefined
@@ -255,10 +374,33 @@ function renderStepNode(
     retryInfo += `\\n⏱ timeout ${timeoutStr}`;
   }
 
-  // Combine all label parts with icon
-  const escapedLabel = (stateIcon + label + ioInfo + retryInfo + timing).trim();
+  // Add onAfterStep hook info if present
+  let hookInfo = "";
+  if (hooks && node.key && hooks.onAfterStep.has(node.key)) {
+    const hookExec = hooks.onAfterStep.get(node.key)!;
+    const hookIcon = hookExec.state === "success" ? "⚙" : "⚠";
+    const hookTiming = options.showTimings && hookExec.durationMs !== undefined
+      ? ` ${formatDuration(hookExec.durationMs)}`
+      : "";
+    hookInfo = `\\n${hookIcon} hook${hookTiming}`;
+  }
 
-  const stateClass = getStateClass(node.state);
+  // Combine all label parts with icon
+  const escapedLabel = (stateIcon + label + ioInfo + retryInfo + hookInfo + timing).trim();
+
+  // Determine class: use heatmap if enabled and data available, otherwise use state
+  let nodeClass: string;
+  const nodeId = node.name ?? node.id;
+  const heat = enhanced?.showHeatmap && enhanced.heatmapData
+    ? enhanced.heatmapData.heat.get(node.id) ?? enhanced.heatmapData.heat.get(nodeId)
+    : undefined;
+
+  if (heat !== undefined) {
+    const level = getHeatLevel(heat);
+    nodeClass = getHeatClass(level);
+  } else {
+    nodeClass = getStateClass(node.state);
+  }
 
   // Use different shapes based on state (like AWS Step Functions)
   let shape: string;
@@ -280,7 +422,7 @@ function renderStepNode(
       shape = `[${escapedLabel}]`;
   }
 
-  lines.push(`    ${id}${shape}:::${stateClass}`);
+  lines.push(`    ${id}${shape}:::${nodeClass}`);
 
   return { entryId: id, exitId: id };
 }
@@ -291,7 +433,9 @@ function renderStepNode(
 function renderParallelNode(
   node: ParallelNode,
   options: RenderOptions,
-  lines: string[]
+  lines: string[],
+  enhanced?: EnhancedRenderOptions,
+  hooks?: WorkflowHooks
 ): RenderResult {
   const subgraphId = generateNodeId("parallel");
   const forkId = `${subgraphId}_fork`;
@@ -323,7 +467,7 @@ function renderParallelNode(
   // Child branches - render in parallel columns
   const childExitIds: string[] = [];
   for (const child of node.children) {
-    const result = renderNode(child, options, lines);
+    const result = renderNode(child, options, lines, enhanced, hooks);
     lines.push(`    ${forkId} --> ${result.entryId}`);
     childExitIds.push(result.exitId);
   }
@@ -349,7 +493,9 @@ function renderParallelNode(
 function renderRaceNode(
   node: RaceNode,
   options: RenderOptions,
-  lines: string[]
+  lines: string[],
+  enhanced?: EnhancedRenderOptions,
+  hooks?: WorkflowHooks
 ): RenderResult {
   const subgraphId = generateNodeId("race");
   const startId = `${subgraphId}_start`;
@@ -379,12 +525,12 @@ function renderRaceNode(
   // Child branches
   const childExitIds: Array<{ exitId: string; isWinner: boolean }> = [];
   let winnerExitId: string | undefined;
-  
+
   for (const child of node.children) {
-    const result = renderNode(child, options, lines);
+    const result = renderNode(child, options, lines, enhanced, hooks);
     const isWinner = isStepNode(child) && node.winnerId === child.id;
     lines.push(`    ${startId} --> ${result.entryId}`);
-    
+
     if (isWinner) {
       winnerExitId = result.exitId;
     }
@@ -421,7 +567,9 @@ function renderRaceNode(
 function renderDecisionNode(
   node: DecisionNode,
   options: RenderOptions,
-  lines: string[]
+  lines: string[],
+  enhanced?: EnhancedRenderOptions,
+  hooks?: WorkflowHooks
 ): RenderResult {
   const decisionId = node.key
     ? `decision_${node.key.replace(/[^a-zA-Z0-9]/g, "_")}`
@@ -465,7 +613,7 @@ function renderDecisionNode(
     if (branch.children.length > 0) {
       let prevId = branchId;
       for (const child of branch.children) {
-        const result = renderNode(child, options, lines);
+        const result = renderNode(child, options, lines, enhanced, hooks);
         lines.push(`    ${prevId} --> ${result.entryId}`);
         prevId = result.exitId;
       }

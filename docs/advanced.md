@@ -26,6 +26,30 @@ const { values, errors } = partition(results);
 
 Async versions: `allAsync`, `allSettledAsync`, `anyAsync`.
 
+## Named Parallel Operations
+
+Use `step.parallel()` with a named object for cleaner parallel execution with typed results:
+
+```typescript
+const result = await workflow(async (step, { fetchUser, fetchPosts, fetchComments }) => {
+  // Named object form - each key gets its typed result
+  const { user, posts, comments } = await step.parallel({
+    user: () => fetchUser(id),
+    posts: () => fetchPosts(id),
+    comments: () => fetchComments(id),
+  }, { name: 'Fetch user data' });
+
+  // user: User, posts: Post[], comments: Comment[] - all typed!
+  return { user, posts, comments };
+});
+```
+
+Benefits:
+- **Named results**: Destructure by name instead of array index
+- **Type inference**: Each key preserves its specific type
+- **Scope events**: Emits `scope_start`/`scope_end` for visualization
+- **Fail-fast**: Short-circuits on first error (like `allAsync`)
+
 ## Dynamic error mapping
 
 Use `{ onError }` instead of `{ error }` to create errors from the caught value:
@@ -232,6 +256,214 @@ const result = await run.strict<User, AppError>(
 ```
 
 Prefer `createWorkflow` for automatic error type inference.
+
+## Workflow Hooks
+
+`createWorkflow` supports hooks for distributed systems integration:
+
+```typescript
+const workflow = createWorkflow({ processOrder }, {
+  // Called first - check if workflow should run (concurrency control)
+  shouldRun: async (workflowId, context) => {
+    const lock = await acquireDistributedLock(workflowId);
+    return lock.acquired; // false skips workflow execution
+  },
+
+  // Called after shouldRun - additional pre-flight checks
+  onBeforeStart: async (workflowId, context) => {
+    await extendMessageVisibility(context.messageId);
+    return true; // false skips workflow execution
+  },
+
+  // Called after each keyed step completes - for checkpointing
+  onAfterStep: async (stepKey, result, workflowId, context) => {
+    await checkpointStep(workflowId, stepKey, result);
+  },
+});
+```
+
+### Hook execution order
+
+1. `shouldRun` - Return `false` to skip (e.g., rate limiting, duplicate detection)
+2. `onBeforeStart` - Return `false` to skip (e.g., distributed locking)
+3. Workflow executes, calling `onAfterStep` after each keyed step
+4. `onEvent` receives all workflow events
+
+### Use cases
+
+| Hook | Use Case |
+|------|----------|
+| `shouldRun` | Distributed locking, rate limiting, duplicate detection |
+| `onBeforeStart` | Queue message visibility, acquire resources |
+| `onAfterStep` | Checkpoint to external store, extend message visibility |
+
+#### `shouldRun` - Concurrency Control
+
+Use for early gating before workflow execution starts:
+
+**Distributed locking** - Prevent duplicate execution across instances:
+```typescript
+shouldRun: async (workflowId) => {
+  const lock = await redis.set(`lock:${workflowId}`, '1', 'EX', 3600, 'NX');
+  return lock === 'OK'; // false = another instance is running
+}
+```
+
+**Rate limiting** - Skip if too many workflows are running:
+```typescript
+shouldRun: async () => {
+  const count = await getActiveWorkflowCount();
+  return count < MAX_CONCURRENT_WORKFLOWS;
+}
+```
+
+**Duplicate detection** - Skip if already processed:
+```typescript
+shouldRun: async (workflowId) => {
+  const exists = await db.workflows.findUnique({ where: { id: workflowId } });
+  return !exists; // Skip if already processed
+}
+```
+
+#### `onBeforeStart` - Pre-flight Setup
+
+Use for setup operations that must happen before execution:
+
+**Queue message visibility** - Extend visibility timeout (SQS, RabbitMQ):
+```typescript
+onBeforeStart: async (workflowId, ctx) => {
+  await sqs.changeMessageVisibility({
+    ReceiptHandle: ctx.messageHandle,
+    VisibilityTimeout: 300 // 5 minutes
+  });
+  return true;
+}
+```
+
+**Resource acquisition** - Acquire database connections, file locks:
+```typescript
+onBeforeStart: async (workflowId) => {
+  const connection = await acquireDbConnection();
+  if (!connection) return false; // Skip if no resources available
+  return true;
+}
+```
+
+**Pre-flight validation** - Check prerequisites before starting:
+```typescript
+onBeforeStart: async (workflowId, ctx) => {
+  const order = await db.orders.findUnique({ where: { id: ctx.orderId } });
+  return order?.status === 'PENDING'; // Only process pending orders
+}
+```
+
+#### `onAfterStep` - Checkpointing & Observability
+
+Use for incremental persistence and monitoring after each step:
+
+**Incremental checkpointing** - Save progress after each step:
+```typescript
+onAfterStep: async (stepKey, result, workflowId, ctx) => {
+  // Save progress even if workflow crashes later
+  await db.checkpoints.upsert({
+    where: { workflowId_stepKey: { workflowId, stepKey } },
+    update: { result: JSON.stringify(result), updatedAt: new Date() },
+    create: { workflowId, stepKey, result: JSON.stringify(result) }
+  });
+}
+```
+
+**Queue message visibility extension** - Keep message alive during long workflows:
+```typescript
+onAfterStep: async (stepKey, result, workflowId, ctx) => {
+  // Extend visibility every step to prevent timeout
+  await sqs.changeMessageVisibility({
+    ReceiptHandle: ctx.messageHandle,
+    VisibilityTimeout: 300
+  });
+}
+```
+
+**Progress notifications** - Send updates to users/operators:
+```typescript
+onAfterStep: async (stepKey, result, workflowId, ctx) => {
+  if (result.ok) {
+    await notifyUser(ctx.userId, {
+      workflowId,
+      step: stepKey,
+      status: 'completed',
+      progress: calculateProgress(stepKey)
+    });
+  }
+}
+```
+
+**Metrics & monitoring** - Track step performance:
+```typescript
+onAfterStep: async (stepKey, result, workflowId, ctx) => {
+  await metrics.record({
+    workflowId,
+    stepKey,
+    success: result.ok,
+    duration: Date.now() - ctx.stepStartTime
+  });
+}
+```
+
+**Dead letter queue management** - Handle persistent failures:
+```typescript
+onAfterStep: async (stepKey, result, workflowId, ctx) => {
+  if (!result.ok && ctx.retryCount >= MAX_RETRIES) {
+    await sendToDeadLetterQueue(workflowId, stepKey, result);
+  }
+}
+```
+
+**Workflow state snapshots** - Create resumable checkpoints:
+```typescript
+onAfterStep: async (stepKey, result, workflowId, ctx) => {
+  // Create snapshot for crash recovery
+  const snapshot = await createSnapshot(workflowId, stepKey, result);
+  await db.snapshots.create({ data: snapshot });
+}
+```
+
+**Stream/event publishing** - Emit step completion events:
+```typescript
+onAfterStep: async (stepKey, result, workflowId, ctx) => {
+  await eventStream.publish({
+    type: 'step_completed',
+    workflowId,
+    stepKey,
+    success: result.ok,
+    timestamp: Date.now()
+  });
+}
+```
+
+**Important notes:**
+- `onAfterStep` is called for both success and error results
+- Only called for steps with a `key` option
+- Works even without a cache (useful for checkpointing-only scenarios)
+- Called after each step completes, not for cached steps
+
+### With context
+
+Combine hooks with `createContext` for request-scoped data:
+
+```typescript
+type Context = { messageId: string; traceId: string };
+
+const workflow = createWorkflow<Deps, Context>({ processOrder }, {
+  createContext: () => ({
+    messageId: getCurrentMessageId(),
+    traceId: generateTraceId(),
+  }),
+  onAfterStep: async (stepKey, result, workflowId, ctx) => {
+    console.log(`[${ctx.traceId}] Step ${stepKey} completed`);
+  },
+});
+```
 
 ## Circuit Breaker
 
@@ -737,12 +969,86 @@ servicePolicies.fileSystem   // 2min timeout, 3 retries
 servicePolicies.rateLimited  // 10s timeout, 5 linear retries
 ```
 
+## Save & Resume Workflows
+
+Persist workflow state to a database and resume later from exactly where you left off. Perfect for crash recovery, long-running workflows, or pausing for approvals.
+
+### Quick Start: Collect, Save, Resume
+
+The easiest way to save and resume workflows is using `createStepCollector()`:
+
+```typescript
+import { createWorkflow, createStepCollector, stringifyState, parseState } from '@jagreehal/workflow';
+
+// 1. Collect state during execution
+const collector = createStepCollector();
+const workflow = createWorkflow({ fetchUser, fetchPosts }, {
+  onEvent: collector.handleEvent, // Automatically collects step_complete events
+});
+
+await workflow(async (step) => {
+  // Only steps with keys are saved
+  const user = await step(() => fetchUser("1"), { key: "user:1" });
+  const posts = await step(() => fetchPosts(user.id), { key: `posts:${user.id}` });
+  return { user, posts };
+});
+
+// 2. Get collected state
+const state = collector.getState();
+
+// 3. Save to database
+const json = stringifyState(state, { workflowId: "123", timestamp: Date.now() });
+await db.workflowStates.create({ id: "123", state: json });
+
+// 4. Resume later
+const saved = await db.workflowStates.findUnique({ where: { id: "123" } });
+const savedState = parseState(saved.state);
+
+const resumed = createWorkflow({ fetchUser, fetchPosts }, {
+  resumeState: savedState, // Pre-populates cache from saved state
+});
+
+// Cached steps skip execution automatically
+await resumed(async (step) => {
+  const user = await step(() => fetchUser("1"), { key: "user:1" }); // ✅ Cache hit
+  const posts = await step(() => fetchPosts(user.id), { key: `posts:${user.id}` }); // ✅ Cache hit
+  return { user, posts };
+});
+```
+
+### Why Use `createStepCollector()`?
+
+- **Automatic filtering**: Only collects `step_complete` events (ignores other events)
+- **Metadata preservation**: Captures both result and meta for proper error replay
+- **Type-safe**: Returns properly typed `ResumeState`
+- **Convenient API**: Simple `handleEvent` → `getState` pattern
+
+### Manual Collection (Advanced)
+
+If you need custom filtering or processing, you can collect events manually:
+
+```typescript
+import { createWorkflow, isStepComplete, type ResumeStateEntry } from '@jagreehal/workflow';
+
+const savedSteps = new Map<string, ResumeStateEntry>();
+const workflow = createWorkflow(deps, {
+  onEvent: (event) => {
+    if (isStepComplete(event)) {
+      // Custom filtering or processing
+      if (event.stepKey.startsWith('important:')) {
+        savedSteps.set(event.stepKey, { result: event.result, meta: event.meta });
+      }
+    }
+  },
+});
+```
+
 ## Pluggable Persistence Adapters
 
 First-class adapters for `StepCache` and `ResumeState` with JSON-safe serialization:
 
 ```typescript
-import { 
+import {
   createMemoryCache,
   createFileCache,
   createKVCache,
@@ -791,9 +1097,22 @@ const kvCache = createKVCache({
 });
 
 // State persistence for workflow resumption
-const persistence = createStatePersistence(kvStore, 'workflow:state:');
+const persistence = createStatePersistence({
+  get: (key) => redis.get(key),
+  set: (key, value) => redis.set(key, value),
+  delete: (key) => redis.del(key).then(n => n > 0),
+  exists: (key) => redis.exists(key).then(n => n > 0),
+  keys: (pattern) => redis.keys(pattern),
+}, 'workflow:state:');
 
-await persistence.save('run-123', resumeState, { userId: 'user-1' });
+// Save workflow state
+const collector = createStepCollector();
+const workflow = createWorkflow(deps, { onEvent: collector.handleEvent });
+await workflow(async (step) => { /* ... */ });
+
+await persistence.save('run-123', collector.getState(), { userId: 'user-1' });
+
+// Load and resume
 const loaded = await persistence.load('run-123');
 const allRuns = await persistence.list();
 
@@ -825,6 +1144,52 @@ const restored = deserializeResult(serialized);
 // Serialize entire workflow state
 const json = stringifyState(resumeState, { userId: 'user-1' });
 const state = parseState(json);
+```
+
+### Database Integration Patterns
+
+**PostgreSQL/MySQL with Prisma:**
+
+```typescript
+// Save
+const state = collector.getState();
+const json = stringifyState(state, { workflowId: runId });
+await prisma.workflowState.upsert({
+  where: { runId },
+  update: { state: json, updatedAt: new Date() },
+  create: { runId, state: json },
+});
+
+// Load
+const saved = await prisma.workflowState.findUnique({ where: { runId } });
+const savedState = parseState(saved.state);
+```
+
+**DynamoDB:**
+
+```typescript
+const persistence = createStatePersistence({
+  get: async (key) => {
+    const result = await dynamodb.get({ TableName: 'workflows', Key: { id: key } });
+    return result.Item?.state || null;
+  },
+  set: async (key, value) => {
+    await dynamodb.put({ TableName: 'workflows', Item: { id: key, state: value } });
+  },
+  delete: async (key) => {
+    await dynamodb.delete({ TableName: 'workflows', Key: { id: key } });
+    return true;
+  },
+  exists: async (key) => {
+    const result = await dynamodb.get({ TableName: 'workflows', Key: { id: key } });
+    return !!result.Item;
+  },
+  keys: async (pattern) => {
+    // Implement pattern matching for your use case
+    const result = await dynamodb.scan({ TableName: 'workflows' });
+    return result.Items?.map(item => item.id) || [];
+  },
+}, 'workflow:state:');
 ```
 
 ## Devtools

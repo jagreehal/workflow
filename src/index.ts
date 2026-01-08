@@ -169,6 +169,7 @@ export {
   type WorkflowOptionsStrict,
   type Workflow,
   type WorkflowStrict,
+  type WorkflowContext,
   type StepCache,
   type ResumeState,
   type ResumeStateEntry,

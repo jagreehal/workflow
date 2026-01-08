@@ -20,6 +20,7 @@ import {
   createWorkflow,
   ErrorsOfDeps,
   allAsync,
+  type WorkflowEvent,
 } from "./index";
 
 // =============================================================================
@@ -845,4 +846,177 @@ async function _test36ParallelWithCreateWorkflow() {
     // Error should be "NOT_FOUND" | "FETCH_ERROR" | UnexpectedError
     expectType<"NOT_FOUND" | "FETCH_ERROR" | UnexpectedError>(result.error);
   }
+}
+
+// =============================================================================
+// TEST: Context type safety in events and handlers
+// =============================================================================
+
+async function _testContextTypeSafety() {
+  type RequestContext = { requestId: string; userId: string };
+  type AppError = "NOT_FOUND";
+
+  // Test 1: WorkflowEvent includes context type
+  const workflow = createWorkflow(
+    { fetchUser },
+    {
+      createContext: (): RequestContext => ({
+        requestId: "req-123",
+        userId: "user-456",
+      }),
+      onEvent: (event, ctx) => {
+        // Context should be typed in event
+        if (event.type === "workflow_start") {
+          expectType<RequestContext | undefined>(event.context);
+          if (event.context) {
+            expectType<string>(event.context.requestId);
+            expectType<string>(event.context.userId);
+          }
+        }
+        // Separate ctx parameter should also be typed
+        expectType<RequestContext>(ctx);
+        expectType<string>(ctx.requestId);
+        expectType<string>(ctx.userId);
+      },
+      onError: (error, stepName, ctx) => {
+        // onError should receive typed context
+        expectType<AppError | UnexpectedError>(error);
+        expectType<string | undefined>(stepName);
+        expectType<RequestContext | undefined>(ctx);
+        if (ctx) {
+          expectType<string>(ctx.requestId);
+          expectType<string>(ctx.userId);
+        }
+      },
+    }
+  );
+
+  await workflow(async (step) => {
+    return await step(fetchUser("123"));
+  });
+}
+
+// =============================================================================
+// TEST: Context defaults to unknown when not specified
+// =============================================================================
+
+async function _testContextDefaultsToUnknown() {
+  // When no context is provided, WorkflowEvent should default to unknown
+  // But createWorkflow without createContext uses void for C
+  const workflow = createWorkflow({ fetchUser }, {
+    onEvent: (event, ctx) => {
+      // event.context should be void | undefined (default C = void)
+      expectType<void | undefined>(event.context);
+      // ctx should be void (default)
+      expectType<void>(ctx);
+    },
+  });
+
+  await workflow(async (step) => {
+    return await step(fetchUser("123"));
+  });
+  
+  // Test with explicit unknown context type
+  const workflowWithUnknown = createWorkflow<{ fetchUser: typeof fetchUser }, unknown>({ fetchUser }, {
+    onEvent: (event, ctx) => {
+      // When explicitly typed as unknown, context should be unknown | undefined
+      expectType<unknown | undefined>(event.context);
+      expectType<unknown>(ctx);
+    },
+  });
+
+  await workflowWithUnknown(async (step) => {
+    return await step(fetchUser("123"));
+  });
+}
+
+// =============================================================================
+// TEST: Context type in run() function
+// =============================================================================
+
+async function _testRunContextTypeSafety() {
+  type RequestContext = { requestId: string };
+
+  await run<User, "NOT_FOUND", RequestContext>(
+    async (step) => {
+      return await step(fetchUser("123"));
+    },
+    {
+      context: { requestId: "req-123" },
+      onEvent: (event, ctx) => {
+        // Context should be typed
+        expectType<RequestContext | undefined>(event.context);
+        expectType<RequestContext>(ctx);
+        if (event.context) {
+          expectType<string>(event.context.requestId);
+        }
+      },
+      onError: (error, stepName, ctx) => {
+        // onError should receive typed context
+        expectType<RequestContext | undefined>(ctx);
+        if (ctx) {
+          expectType<string>(ctx.requestId);
+        }
+      },
+    }
+  );
+}
+
+// =============================================================================
+// TEST: Context type in run.strict()
+// =============================================================================
+
+async function _testRunStrictContextTypeSafety() {
+  type RequestContext = { requestId: string };
+  type AppError = "NOT_FOUND" | "UNEXPECTED";
+
+  await run.strict<User, AppError, RequestContext>(
+    async (step) => {
+      return await step(fetchUser("123"));
+    },
+    {
+      context: { requestId: "req-123" },
+      catchUnexpected: () => "UNEXPECTED" as const,
+      onEvent: (event, ctx) => {
+        expectType<RequestContext | undefined>(event.context);
+        expectType<RequestContext>(ctx);
+      },
+      onError: (error, stepName, ctx) => {
+        expectType<AppError>(error);
+        expectType<string | undefined>(stepName);
+        expectType<RequestContext | undefined>(ctx);
+      },
+    }
+  );
+}
+
+// =============================================================================
+// TEST: WorkflowEvent generic preserves context type
+// =============================================================================
+
+function _testWorkflowEventContextGeneric() {
+  type RequestContext = { requestId: string };
+  type AppError = "NOT_FOUND";
+
+  // WorkflowEvent should preserve context type
+  type EventWithContext = WorkflowEvent<AppError, RequestContext>;
+  
+  // Extract a specific event type
+  type WorkflowStartEvent = Extract<EventWithContext, { type: "workflow_start" }>;
+  expectType<{ type: "workflow_start"; workflowId: string; ts: number; context?: RequestContext }>(
+    {} as WorkflowStartEvent
+  );
+
+  type StepErrorEvent = Extract<EventWithContext, { type: "step_error" }>;
+  expectType<{ 
+    type: "step_error"; 
+    workflowId: string; 
+    stepId: string; 
+    stepKey?: string; 
+    name?: string; 
+    ts: number; 
+    durationMs: number; 
+    error: AppError;
+    context?: RequestContext;
+  }>({} as StepErrorEvent);
 }

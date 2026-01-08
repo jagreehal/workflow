@@ -770,16 +770,34 @@ const result = await workflow(async (step) => {
 
 ### With Event Emission
 
-Use `createConditionalHelpers` to emit `step_skipped` events for visualization and debugging:
+Use `createConditionalHelpers` with `run()` or `createWorkflow` to emit `step_skipped` events for visualization and debugging. **Context is automatically included in skipped events when provided**, maintaining correlation with other workflow events.
+
+**Note**: Both `run()` and `createWorkflow` support conditional helpers with event emission. With `createWorkflow`, use the `ctx` parameter (always provided) to access `workflowId`, `onEvent`, and `context` for conditional helpers.
 
 ```typescript
+// With run() - full support for conditional helpers with context
+type RequestContext = { requestId: string; userId: string };
+
+const requestContext: RequestContext = { requestId: 'req-123', userId: 'user-456' };
+
+// Define workflowId and onEvent before calling run()
+const workflowId = 'my-workflow-id';
+const onEvent = (event: WorkflowEvent<unknown, RequestContext>) => {
+  console.log('Event:', event.type, 'Context:', event.context);
+};
+
 const result = await run(async (step) => {
-  const ctx = { workflowId: 'my-workflow', onEvent: console.log };
+  // Pass workflowId, onEvent, and context to conditional helpers
+  const ctx = { 
+    workflowId,      // Captured from outer scope
+    onEvent,         // Captured from outer scope
+    context: requestContext  // Context automatically added to step_skipped events
+  };
   const { when, whenOr } = createConditionalHelpers(ctx);
 
   const user = await step(fetchUser(id));
 
-  // Emits step_skipped event when condition is false
+  // Emits step_skipped event with context when condition is false
   const premium = await when(
     user.isPremium,
     () => step(() => fetchPremiumData(user.id)),
@@ -787,8 +805,43 @@ const result = await run(async (step) => {
   );
 
   return { user, premium };
-}, { onEvent, workflowId });
+}, { onEvent, workflowId, context: requestContext });
 ```
+
+```typescript
+// With createWorkflow - use WorkflowContext parameter for conditional helpers
+// The callback receives a third parameter `ctx` (always provided) with workflowId, onEvent, and context
+
+const workflow = createWorkflow({ fetchUser }, {
+  createContext: () => ({ requestId: 'req-123', userId: 'user-456' }),
+  onEvent: (event, ctx) => {
+    // All workflow events automatically include context, including step_skipped from conditional helpers
+    console.log('Event context:', event.context);
+  }
+});
+
+// Use conditional helpers with ctx parameter (ctx is always provided)
+await workflow(async (step, deps, ctx) => {
+  const user = await step(fetchUser(id));
+  
+  // ctx can be passed directly to createConditionalHelpers (same shape)
+  const { when } = createConditionalHelpers(ctx);
+  
+  // Emits step_skipped event with context when condition is false
+  const premium = await when(
+    user.isPremium,
+    () => step(() => fetchPremiumData(user.id)),
+    { name: 'premium-data', reason: 'User is not premium' }
+  );
+  
+  return { user, premium };
+});
+```
+
+**Important Notes**:
+- **With `run()`**: Full support for conditional helpers with event emission and context correlation. Capture `workflowId`, `onEvent`, and `context` from options before calling `run()`, then pass them to `createConditionalHelpers`.
+- **With `createWorkflow`**: The `ctx` parameter (third parameter) is always provided in your callback. It contains `workflowId`, `onEvent`, and `context`. Pass these to `createConditionalHelpers` for full event emission support.
+- **Backward Compatibility**: Existing code that doesn't use the `ctx` parameter continues to work (TypeScript allows unused parameters). You can ignore `ctx` if you don't need conditional helpers with event emission.
 
 ## Webhook / Event Trigger Adapters
 

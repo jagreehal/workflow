@@ -7,9 +7,13 @@
 ```typescript
 createWorkflow(deps)                                    // Auto-inferred error types
 createWorkflow(deps, { strict: true, catchUnexpected }) // Closed error union
-createWorkflow(deps, { onEvent, createContext })        // Event stream + context
+createWorkflow(deps, { onEvent, createContext })        // Event stream + context (context auto-included in events)
 createWorkflow(deps, { cache })                         // Step caching
 createWorkflow(deps, { resumeState })                   // Resume from saved state
+
+// Callback signatures:
+workflow(async (step, deps, ctx) => { ... })           // ctx is always provided (WorkflowContext)
+workflow(args, async (step, deps, args, ctx) => { ... }) // With typed args, ctx is always provided
 ```
 
 ### step
@@ -33,7 +37,8 @@ step.try(fn, { error, name, key })  // With tracing options
 
 ```typescript
 run(fn)                             // One-off workflow
-run(fn, { onError })                // With error callback
+run(fn, { onError })                // With error callback (receives context as 3rd param)
+run(fn, { onEvent, context })       // With event stream (context auto-included in events)
 run.strict(fn, { catchUnexpected }) // Closed error union
 ```
 
@@ -146,18 +151,42 @@ UnexpectedError                     // { type: 'UNEXPECTED_ERROR', cause: unknow
 ### Workflow types
 
 ```typescript
-Workflow<E, Deps>                   // Non-strict workflow return type
-WorkflowStrict<E, U, Deps>          // Strict workflow return type
+Workflow<E, Deps, C>                // Non-strict workflow return type (C is context type)
+WorkflowStrict<E, U, Deps, C>       // Strict workflow return type (C is context type)
 WorkflowOptions<E, C>               // Options for createWorkflow
 WorkflowOptionsStrict<E, U, C>      // Options for strict createWorkflow
+WorkflowContext<C>                  // Context object passed to callbacks: { workflowId, onEvent?, context? }
 AnyResultFn                         // Constraint for Result-returning functions
 ```
+
+**WorkflowContext**: The third parameter (`ctx`) in workflow callbacks is always provided and contains:
+- `workflowId`: Unique ID for this workflow run (always present)
+- `onEvent`: Event emitter function (present if `onEvent` option provided, for conditional helpers)
+- `context`: Per-run context from `createContext` (present if `createContext` provided)
+
+**Note**: 
+- You can ignore the `ctx` parameter if you don't need it (TypeScript allows unused parameters).
+- `WorkflowContext` has the same shape as `ConditionalContext`, so you can pass `ctx` directly to `createConditionalHelpers(ctx)` without destructuring.
 
 ### Event types
 
 ```typescript
-WorkflowEvent<E>                    // Union of all event types
+WorkflowEvent<E, C>                 // Union of all event types (C defaults to unknown)
 StepOptions                         // { name?: string, key?: string }
+```
+
+**Context in Events**: When you provide context via `createContext` or the `context` option, it's automatically included in every event's `context` field. This makes it easy to correlate events with request data, user IDs, or other contextual information.
+
+```typescript
+// Context is automatically added to all events
+const workflow = createWorkflow({ fetchUser }, {
+  createContext: () => ({ requestId: 'req-123', userId: 'user-456' }),
+  onEvent: (event) => {
+    // event.context is automatically available
+    console.log(event.context?.requestId); // 'req-123'
+    console.log(event.context?.userId);    // 'user-456'
+  }
+});
 ```
 
 ### Cache & Resume types
@@ -293,8 +322,10 @@ createConditionalHelpers(ctx)              // Factory for bound helpers
 
 ```typescript
 ConditionalOptions                  // { name?, key?, reason? }
-ConditionalContext                  // { workflowId, onEvent? }
+ConditionalContext<C>               // { workflowId, onEvent?, context?: C }
 ```
+
+**Context in Conditional Events**: When you provide `context` in `ConditionalContext`, it's automatically included in `step_skipped` events, maintaining correlation with other workflow events.
 
 ## Webhook / Event Triggers
 

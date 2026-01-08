@@ -732,20 +732,20 @@ export interface RunStep<E = unknown> {
  */
 export type ScopeType = "parallel" | "race" | "allSettled";
 
-export type WorkflowEvent<E> =
-  | { type: "workflow_start"; workflowId: string; ts: number }
-  | { type: "workflow_success"; workflowId: string; ts: number; durationMs: number }
-  | { type: "workflow_error"; workflowId: string; ts: number; durationMs: number; error: E }
-  | { type: "step_start"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number }
-  | { type: "step_success"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number }
-  | { type: "step_error"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number; error: E }
-  | { type: "step_aborted"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number }
-  | { type: "step_complete"; workflowId: string; stepKey: string; name?: string; ts: number; durationMs: number; result: Result<unknown, unknown, unknown>; meta?: StepFailureMeta }
-  | { type: "step_cache_hit"; workflowId: string; stepKey: string; name?: string; ts: number }
-  | { type: "step_cache_miss"; workflowId: string; stepKey: string; name?: string; ts: number }
-  | { type: "step_skipped"; workflowId: string; stepKey?: string; name?: string; reason?: string; decisionId?: string; ts: number }
-  | { type: "scope_start"; workflowId: string; scopeId: string; scopeType: ScopeType; name?: string; ts: number }
-  | { type: "scope_end"; workflowId: string; scopeId: string; ts: number; durationMs: number; winnerId?: string }
+export type WorkflowEvent<E, C = unknown> =
+  | { type: "workflow_start"; workflowId: string; ts: number; context?: C }
+  | { type: "workflow_success"; workflowId: string; ts: number; durationMs: number; context?: C }
+  | { type: "workflow_error"; workflowId: string; ts: number; durationMs: number; error: E; context?: C }
+  | { type: "step_start"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; context?: C }
+  | { type: "step_success"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number; context?: C }
+  | { type: "step_error"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number; error: E; context?: C }
+  | { type: "step_aborted"; workflowId: string; stepId: string; stepKey?: string; name?: string; ts: number; durationMs: number; context?: C }
+  | { type: "step_complete"; workflowId: string; stepKey: string; name?: string; ts: number; durationMs: number; result: Result<unknown, unknown, unknown>; meta?: StepFailureMeta; context?: C }
+  | { type: "step_cache_hit"; workflowId: string; stepKey: string; name?: string; ts: number; context?: C }
+  | { type: "step_cache_miss"; workflowId: string; stepKey: string; name?: string; ts: number; context?: C }
+  | { type: "step_skipped"; workflowId: string; stepKey?: string; name?: string; reason?: string; decisionId?: string; ts: number; context?: C }
+  | { type: "scope_start"; workflowId: string; scopeId: string; scopeType: ScopeType; name?: string; ts: number; context?: C }
+  | { type: "scope_end"; workflowId: string; scopeId: string; ts: number; durationMs: number; winnerId?: string; context?: C }
   // Retry events
   | {
       type: "step_retry";
@@ -758,6 +758,7 @@ export type WorkflowEvent<E> =
       maxAttempts: number;
       delayMs: number;
       error: E;
+      context?: C;
     }
   | {
       type: "step_retries_exhausted";
@@ -769,6 +770,7 @@ export type WorkflowEvent<E> =
       durationMs: number;
       attempts: number;
       lastError: E;
+      context?: C;
     }
   // Timeout event
   | {
@@ -780,6 +782,7 @@ export type WorkflowEvent<E> =
       ts: number;
       timeoutMs: number;
       attempt?: number;
+      context?: C;
     }
   // Hook events
   | {
@@ -789,6 +792,7 @@ export type WorkflowEvent<E> =
       durationMs: number;
       result: boolean;
       skipped: boolean;
+      context?: C;
     }
   | {
       type: "hook_should_run_error";
@@ -796,6 +800,7 @@ export type WorkflowEvent<E> =
       ts: number;
       durationMs: number;
       error: E;
+      context?: C;
     }
   | {
       type: "hook_before_start";
@@ -804,6 +809,7 @@ export type WorkflowEvent<E> =
       durationMs: number;
       result: boolean;
       skipped: boolean;
+      context?: C;
     }
   | {
       type: "hook_before_start_error";
@@ -811,6 +817,7 @@ export type WorkflowEvent<E> =
       ts: number;
       durationMs: number;
       error: E;
+      context?: C;
     }
   | {
       type: "hook_after_step";
@@ -818,6 +825,7 @@ export type WorkflowEvent<E> =
       stepKey: string;
       ts: number;
       durationMs: number;
+      context?: C;
     }
   | {
       type: "hook_after_step_error";
@@ -826,6 +834,7 @@ export type WorkflowEvent<E> =
       ts: number;
       durationMs: number;
       error: E;
+      context?: C;
     };
 
 // =============================================================================
@@ -837,12 +846,15 @@ export type RunOptionsWithCatch<E, C = void> = {
    * Handler for expected errors.
    * Called when a step fails with a known error type.
    */
-  onError?: (error: E, stepName?: string) => void;
+  onError?: (error: E, stepName?: string, ctx?: C) => void;
   /**
    * Listener for workflow events (start, success, error, step events).
    * Use this for logging, telemetry, or debugging.
+   * 
+   * Context is automatically included in `event.context` when provided via the `context` option.
+   * The separate `ctx` parameter is provided for convenience.
    */
-  onEvent?: (event: WorkflowEvent<E | UnexpectedError>, ctx: C) => void;
+  onEvent?: (event: WorkflowEvent<E | UnexpectedError, C>, ctx: C) => void;
   /**
    * Catch-all mapper for unexpected exceptions.
    * Required for "Strict Mode".
@@ -856,7 +868,7 @@ export type RunOptionsWithCatch<E, C = void> = {
    */
   workflowId?: string;
   /**
-   * Arbitrary context object passed to onEvent.
+   * Arbitrary context object passed to onEvent and onError.
    * Useful for passing request IDs, user IDs, or loggers.
    */
   context?: C;
@@ -867,8 +879,14 @@ export type RunOptionsWithoutCatch<E, C = void> = {
    * Handler for expected errors AND unexpected errors.
    * Unexpected errors will be wrapped in `UnexpectedError`.
    */
-  onError?: (error: E | UnexpectedError, stepName?: string) => void;
-  onEvent?: (event: WorkflowEvent<E | UnexpectedError>, ctx: C) => void;
+  onError?: (error: E | UnexpectedError, stepName?: string, ctx?: C) => void;
+  /**
+   * Listener for workflow events (start, success, error, step events).
+   * 
+   * Note: Context is available both on `event.context` and as the separate `ctx` parameter.
+   * The `ctx` parameter is provided for convenience and backward compatibility.
+   */
+  onEvent?: (event: WorkflowEvent<E | UnexpectedError, C>, ctx: C) => void;
   catchUnexpected?: undefined;
   workflowId?: string;
   context?: C;
@@ -1209,8 +1227,8 @@ export function run<T, E, C = void>(
 export function run<T, E, C = void>(
   fn: (step: RunStep<E | UnexpectedError>) => Promise<T> | T,
   options: {
-    onError: (error: E | UnexpectedError, stepName?: string) => void;
-    onEvent?: (event: WorkflowEvent<E | UnexpectedError>, ctx: C) => void;
+    onError: (error: E | UnexpectedError, stepName?: string, ctx?: C) => void;
+    onEvent?: (event: WorkflowEvent<E | UnexpectedError, C>, ctx: C) => void;
     workflowId?: string;
     context?: C;
   }
@@ -1237,7 +1255,7 @@ export function run<T, E, C = void>(
 export function run<T, C = void>(
   fn: (step: RunStep) => Promise<T> | T,
   options?: {
-    onEvent?: (event: WorkflowEvent<UnexpectedError>, ctx: C) => void;
+    onEvent?: (event: WorkflowEvent<UnexpectedError, C>, ctx: C) => void;
     workflowId?: string;
     context?: C;
   }
@@ -1276,11 +1294,19 @@ export async function run<T, E, C = void>(
     return stepKey ?? `step_${++stepIdCounter}`;
   };
 
-  const emitEvent = (event: WorkflowEvent<E | UnexpectedError>) => {
+  const emitEvent = (event: WorkflowEvent<E | UnexpectedError, C>) => {
+    // Add context to event only if:
+    // 1. Event doesn't already have context (preserves replayed events or per-step overrides)
+    // 2. Workflow actually has a context (don't add context: undefined property)
+    const eventWithContext = 
+      event.context !== undefined || context === undefined
+        ? event
+        : ({ ...event, context: context as C } as WorkflowEvent<E | UnexpectedError, C>);
+    
     // Track first successful step in the innermost race scope for winnerId
-    if (event.type === "step_success") {
+    if (eventWithContext.type === "step_success") {
       // Use the stepId from the event (already generated at step start)
-      const stepId = event.stepId;
+      const stepId = eventWithContext.stepId;
 
       // Find innermost race scope (search from end of stack)
       for (let i = activeScopeStack.length - 1; i >= 0; i--) {
@@ -1291,7 +1317,7 @@ export async function run<T, E, C = void>(
         }
       }
     }
-    onEvent?.(event, context as C);
+    onEvent?.(eventWithContext, context as C);
   };
 
   // Use the exported early exit function with proper type parameter
@@ -1669,7 +1695,7 @@ export async function run<T, E, C = void>(
                   meta: { origin: "throw", thrown },
                 });
               }
-              onError?.(mappedError as E, stepName);
+              onError?.(mappedError as E, stepName, context);
               throw earlyExit(mappedError as E, { origin: "throw", thrown });
             } else {
               const unexpectedError: UnexpectedError = {
@@ -1733,7 +1759,7 @@ export async function run<T, E, C = void>(
             meta: { origin: "result", resultCause: errorResult.cause },
           });
         }
-        onError?.(errorResult.error as unknown as E, stepName);
+        onError?.(errorResult.error as unknown as E, stepName, context);
         throw earlyExit(errorResult.error as unknown as E, {
           origin: "result",
           resultCause: errorResult.cause,
@@ -1820,7 +1846,7 @@ export async function run<T, E, C = void>(
               meta: { origin: "throw", thrown: error },
             });
           }
-          onError?.(mapped as unknown as E, stepName);
+          onError?.(mapped as unknown as E, stepName, context);
           throw earlyExit(mapped as unknown as E, { origin: "throw", thrown: error });
         }
       })();
@@ -1911,7 +1937,7 @@ export async function run<T, E, C = void>(
               meta: { origin: "result", resultCause: result.error },
             });
           }
-          onError?.(mapped as unknown as E, stepName);
+          onError?.(mapped as unknown as E, stepName, context);
           throw earlyExit(mapped as unknown as E, {
             origin: "result",
             resultCause: result.error,
@@ -2027,7 +2053,7 @@ export async function run<T, E, C = void>(
           emitScopeEnd();
 
           if (!result.ok) {
-            onError?.(result.error as unknown as E, name);
+            onError?.(result.error as unknown as E, name, context);
             throw earlyExit(result.error as unknown as E, {
               origin: "result",
               resultCause: result.cause,
@@ -2132,7 +2158,7 @@ export async function run<T, E, C = void>(
           const output: Record<string, unknown> = {};
           for (const { key, result } of results) {
             if (!result.ok) {
-              onError?.(result.error as unknown as E, key);
+              onError?.(result.error as unknown as E, key, context);
               throw earlyExit(result.error as unknown as E, {
                 origin: "result",
                 resultCause: result.cause,
@@ -2199,7 +2225,7 @@ export async function run<T, E, C = void>(
           emitScopeEnd();
 
           if (!result.ok) {
-            onError?.(result.error as unknown as E, name);
+            onError?.(result.error as unknown as E, name, context);
             throw earlyExit(result.error as unknown as E, {
               origin: "result",
               resultCause: result.cause,
@@ -2262,7 +2288,7 @@ export async function run<T, E, C = void>(
           emitScopeEnd();
 
           if (!result.ok) {
-            onError?.(result.error as unknown as E, name);
+            onError?.(result.error as unknown as E, name, context);
             throw earlyExit(result.error as unknown as E, {
               origin: "result",
               resultCause: result.cause,
@@ -2303,7 +2329,7 @@ export async function run<T, E, C = void>(
 
     if (catchUnexpected) {
       const mapped = catchUnexpected(error);
-      onError?.(mapped, "unexpected");
+      onError?.(mapped, "unexpected", context);
       return err(mapped, { cause: error });
     }
 
@@ -2311,7 +2337,7 @@ export async function run<T, E, C = void>(
       type: "UNEXPECTED_ERROR",
       cause: { type: "UNCAUGHT_EXCEPTION", thrown: error },
     };
-    onError?.(unexpectedError as unknown as E, "unexpected");
+    onError?.(unexpectedError as unknown as E, "unexpected", context);
     return err(unexpectedError, { cause: error });
   }
 }
@@ -2361,8 +2387,14 @@ export async function run<T, E, C = void>(
 run.strict = <T, E, C = void>(
   fn: (step: RunStep<E>) => Promise<T> | T,
   options: {
-    onError?: (error: E, stepName?: string) => void;
-    onEvent?: (event: WorkflowEvent<E | UnexpectedError>, ctx: C) => void;
+    onError?: (error: E, stepName?: string, ctx?: C) => void;
+    /**
+   * Listener for workflow events (start, success, error, step events).
+   * 
+   * Note: Context is available both on `event.context` and as the separate `ctx` parameter.
+   * The `ctx` parameter is provided for convenience and backward compatibility.
+   */
+  onEvent?: (event: WorkflowEvent<E | UnexpectedError, C>, ctx: C) => void;
     catchUnexpected: (cause: unknown) => E;
     workflowId?: string;
     context?: C;

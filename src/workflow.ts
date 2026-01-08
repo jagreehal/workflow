@@ -287,9 +287,14 @@ export type CausesOfDeps<Deps extends Record<string, AnyResultFn>> =
  * Returns E | UnexpectedError (safe default)
  */
 export type WorkflowOptions<E, C = void> = {
-  onError?: (error: E | UnexpectedError, stepName?: string) => void;
-  /** Unified event stream for workflow and step lifecycle */
-  onEvent?: (event: WorkflowEvent<E | UnexpectedError>, ctx: C) => void;
+  onError?: (error: E | UnexpectedError, stepName?: string, ctx?: C) => void;
+  /** 
+   * Unified event stream for workflow and step lifecycle.
+   * 
+   * Context is automatically included in `event.context` when provided via `createContext`.
+   * The separate `ctx` parameter is provided for convenience.
+   */
+  onEvent?: (event: WorkflowEvent<E | UnexpectedError, C>, ctx: C) => void;
   /** Create per-run context for event correlation */
   createContext?: () => C;
   /** Step result cache - only steps with a `key` option are cached */
@@ -337,9 +342,14 @@ export type WorkflowOptions<E, C = void> = {
 export type WorkflowOptionsStrict<E, U, C = void> = {
   strict: true;              // discriminator
   catchUnexpected: (cause: unknown) => U;
-  onError?: (error: E | U, stepName?: string) => void;
-  /** Unified event stream for workflow and step lifecycle */
-  onEvent?: (event: WorkflowEvent<E | U>, ctx: C) => void;
+  onError?: (error: E | U, stepName?: string, ctx?: C) => void;
+  /** 
+   * Unified event stream for workflow and step lifecycle.
+   * 
+   * Context is automatically included in `event.context` when provided via `createContext`.
+   * The separate `ctx` parameter is provided for convenience.
+   */
+  onEvent?: (event: WorkflowEvent<E | U, C>, ctx: C) => void;
   /** Create per-run context for event correlation */
   createContext?: () => C;
   /** Step result cache - only steps with a `key` option are cached */
@@ -379,6 +389,29 @@ export type WorkflowOptionsStrict<E, U, C = void> = {
 };
 
 /**
+ * Workflow context provided to callbacks, containing workflow metadata.
+ * This allows conditional helpers and other utilities to access workflowId, onEvent, and context.
+ */
+export type WorkflowContext<C = void> = {
+  /**
+   * Unique ID for this workflow run.
+   */
+  workflowId: string;
+
+  /**
+   * Event emitter function for workflow events.
+   * Can be used with conditional helpers to emit step_skipped events.
+   */
+  onEvent?: (event: WorkflowEvent<unknown, C>) => void;
+
+  /**
+   * Per-run context created by createContext (or undefined if not provided).
+   * Automatically included in all workflow events.
+   */
+  context?: C;
+};
+
+/**
  * Workflow return type (non-strict)
  * Supports both argument-less and argument-passing call patterns
  *
@@ -388,20 +421,21 @@ export type WorkflowOptionsStrict<E, U, C = void> = {
  * - Different steps may have different cause types
  * The cause IS preserved at runtime; narrow based on error type if needed.
  */
-export interface Workflow<E, Deps> {
+export interface Workflow<E, Deps, C = void> {
   /**
    * Execute workflow without arguments (original API)
+   * @param fn - Callback receives (step, deps, ctx) where ctx is workflow context (always provided)
    */
-  <T>(fn: (step: RunStep<E>, deps: Deps) => T | Promise<T>): AsyncResult<T, E | UnexpectedError, unknown>;
+  <T>(fn: (step: RunStep<E>, deps: Deps, ctx: WorkflowContext<C>) => T | Promise<T>): AsyncResult<T, E | UnexpectedError, unknown>;
 
   /**
    * Execute workflow with typed arguments
    * @param args - Typed arguments passed to the callback (type inferred at call site)
-   * @param fn - Callback receives (step, deps, args)
+   * @param fn - Callback receives (step, deps, args, ctx) where ctx is workflow context (always provided)
    */
   <T, Args>(
     args: Args,
-    fn: (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>
+    fn: (step: RunStep<E>, deps: Deps, args: Args, ctx: WorkflowContext<C>) => T | Promise<T>
   ): AsyncResult<T, E | UnexpectedError, unknown>;
 }
 
@@ -412,20 +446,21 @@ export interface Workflow<E, Deps> {
  * Note: Cause type is `unknown` because catchUnexpected receives thrown
  * values which have unknown type.
  */
-export interface WorkflowStrict<E, U, Deps> {
+export interface WorkflowStrict<E, U, Deps, C = void> {
   /**
    * Execute workflow without arguments (original API)
+   * @param fn - Callback receives (step, deps, ctx) where ctx is workflow context (always provided)
    */
-  <T>(fn: (step: RunStep<E>, deps: Deps) => T | Promise<T>): AsyncResult<T, E | U, unknown>;
+  <T>(fn: (step: RunStep<E>, deps: Deps, ctx: WorkflowContext<C>) => T | Promise<T>): AsyncResult<T, E | U, unknown>;
 
   /**
    * Execute workflow with typed arguments
    * @param args - Typed arguments passed to the callback (type inferred at call site)
-   * @param fn - Callback receives (step, deps, args)
+   * @param fn - Callback receives (step, deps, args, ctx) where ctx is workflow context (always provided)
    */
   <T, Args>(
     args: Args,
-    fn: (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>
+    fn: (step: RunStep<E>, deps: Deps, args: Args, ctx: WorkflowContext<C>) => T | Promise<T>
   ): AsyncResult<T, E | U, unknown>;
 }
 
@@ -636,17 +671,17 @@ export function createWorkflow<
   // Overloaded workflow executor function
   // Signature 1: No args (original API)
   function workflowExecutor<T>(
-    fn: (step: RunStep<E>, deps: Deps) => T | Promise<T>
+    fn: (step: RunStep<E>, deps: Deps, ctx: WorkflowContext<C>) => T | Promise<T>
   ): Promise<Result<T, E | U | UnexpectedError, unknown>>;
   // Signature 2: With args (new API)
   function workflowExecutor<T, Args>(
     args: Args,
-    fn: (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>
+    fn: (step: RunStep<E>, deps: Deps, args: Args, ctx: WorkflowContext<C>) => T | Promise<T>
   ): Promise<Result<T, E | U | UnexpectedError, unknown>>;
   // Implementation
   async function workflowExecutor<T, Args = undefined>(
-    fnOrArgs: ((step: RunStep<E>, deps: Deps) => T | Promise<T>) | Args,
-    maybeFn?: (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>
+    fnOrArgs: ((step: RunStep<E>, deps: Deps, ctx: WorkflowContext<C>) => T | Promise<T>) | Args,
+    maybeFn?: (step: RunStep<E>, deps: Deps, args: Args, ctx: WorkflowContext<C>) => T | Promise<T>
   ): Promise<Result<T, E | U | UnexpectedError, unknown>> {
     // Detect calling pattern: if second arg is a function, first arg is args
     // This correctly handles functions as args (e.g., workflow(requestFactory, callback))
@@ -654,17 +689,31 @@ export function createWorkflow<
     const args = hasArgs ? (fnOrArgs as Args) : undefined;
     const userFn = hasArgs
       ? maybeFn
-      : (fnOrArgs as (step: RunStep<E>, deps: Deps) => T | Promise<T>);
+      : (fnOrArgs as (step: RunStep<E>, deps: Deps, ctx: WorkflowContext<C>) => T | Promise<T>);
     // Generate workflowId for this run
     const workflowId = crypto.randomUUID();
 
     // Create context for this run
     const context = options?.createContext?.() as C;
 
+    // Create workflow context object to pass to callback
+    const workflowContext: WorkflowContext<C> = {
+      workflowId,
+      onEvent: options?.onEvent as ((event: WorkflowEvent<unknown, C>) => void) | undefined,
+      context: context !== undefined ? context : undefined,
+    };
+
     // Helper to emit workflow events
-    const emitEvent = (event: WorkflowEvent<E | U | UnexpectedError>) => {
+    const emitEvent = (event: WorkflowEvent<E | U | UnexpectedError, C>) => {
+      // Add context to event only if:
+      // 1. Event doesn't already have context (preserves replayed events or per-step overrides)
+      // 2. Workflow actually has a context (don't add context: undefined property)
+      const eventWithContext = 
+        event.context !== undefined || context === undefined
+          ? event
+          : ({ ...event, context: context as C } as WorkflowEvent<E | U | UnexpectedError, C>);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (options as any)?.onEvent?.(event, context);
+      (options as any)?.onEvent?.(eventWithContext, context);
     };
 
     // Check shouldRun hook (concurrency control) - called first
@@ -1174,10 +1223,10 @@ export function createWorkflow<
       return cachedStepFn as RunStep<E>;
     };
 
-    // Wrap the user's callback to pass cached step, deps, and args (when present)
+    // Wrap the user's callback to pass cached step, deps, args (when present), and workflow context
     const wrappedFn = hasArgs
-      ? (step: RunStep<E>) => (userFn as (step: RunStep<E>, deps: Deps, args: Args) => T | Promise<T>)(createCachedStep(step), deps, args as Args)
-      : (step: RunStep<E>) => (userFn as (step: RunStep<E>, deps: Deps) => T | Promise<T>)(createCachedStep(step), deps);
+      ? (step: RunStep<E>) => (userFn as (step: RunStep<E>, deps: Deps, args: Args, ctx: WorkflowContext<C>) => T | Promise<T>)(createCachedStep(step), deps, args as Args, workflowContext)
+      : (step: RunStep<E>) => (userFn as (step: RunStep<E>, deps: Deps, ctx: WorkflowContext<C>) => T | Promise<T>)(createCachedStep(step), deps, workflowContext);
 
     let result: Result<T, E | U | UnexpectedError, unknown>;
 
@@ -1186,7 +1235,7 @@ export function createWorkflow<
       const strictOptions = options as WorkflowOptionsStrict<E, U, C>;
       result = await run.strict<T, E | U, C>(wrappedFn as (step: RunStep<E | U>) => Promise<T> | T, {
         onError: strictOptions.onError,
-        onEvent: strictOptions.onEvent as ((event: WorkflowEvent<E | U | UnexpectedError>, ctx: C) => void) | undefined,
+        onEvent: strictOptions.onEvent as ((event: WorkflowEvent<E | U | UnexpectedError, C>, ctx: C) => void) | undefined,
         catchUnexpected: strictOptions.catchUnexpected,
         workflowId,
         context,

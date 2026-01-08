@@ -38,7 +38,7 @@ export type ConditionalOptions = {
 /**
  * Context for conditional execution, used to emit events.
  */
-export type ConditionalContext = {
+export type ConditionalContext<C = unknown> = {
   /**
    * The workflow ID for event emission.
    */
@@ -47,7 +47,13 @@ export type ConditionalContext = {
   /**
    * Event emitter function.
    */
-  onEvent?: (event: WorkflowEvent<unknown>) => void;
+  onEvent?: (event: WorkflowEvent<unknown, C>) => void;
+
+  /**
+   * Optional context value to include in emitted events.
+   * When provided, this context is automatically added to step_skipped events.
+   */
+  context?: C;
 };
 
 /**
@@ -76,14 +82,15 @@ function generateDecisionId(): string {
  * Emit a step_skipped event.
  * @internal
  */
-function emitSkipped(
-  ctx: ConditionalContext | undefined,
+function emitSkipped<C = unknown>(
+  ctx: ConditionalContext<C> | undefined,
   options: ConditionalOptions | undefined,
   decisionId: string
 ): void {
   if (!ctx?.onEvent) return;
 
-  ctx.onEvent({
+  // Create event with context if provided (similar to emitEvent logic)
+  const event: WorkflowEvent<unknown, C> = {
     type: "step_skipped",
     workflowId: ctx.workflowId,
     stepKey: options?.key,
@@ -91,7 +98,17 @@ function emitSkipped(
     reason: options?.reason,
     decisionId,
     ts: Date.now(),
-  });
+  };
+
+  // Add context to event only if:
+  // 1. Event doesn't already have context (preserves replayed events)
+  // 2. Context is actually provided (don't add context: undefined property)
+  const eventWithContext =
+    event.context !== undefined || ctx.context === undefined
+      ? event
+      : ({ ...event, context: ctx.context } as WorkflowEvent<unknown, C>);
+
+  ctx.onEvent(eventWithContext);
 }
 
 // =============================================================================
@@ -127,28 +144,28 @@ function emitSkipped(
  * });
  * ```
  */
-export function when<T>(
+export function when<T, C = unknown>(
   condition: boolean,
   operation: Operation<T>,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): Promise<T | undefined>;
 
 /**
  * Synchronous overload for when the operation returns a non-Promise value.
  */
-export function when<T>(
+export function when<T, C = unknown>(
   condition: boolean,
   operation: () => T,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): T | undefined | Promise<T | undefined>;
 
-export function when<T>(
+export function when<T, C = unknown>(
   condition: boolean,
   operation: Operation<T>,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): MaybeAsync<T | undefined> {
   if (condition) {
     return operation();
@@ -187,28 +204,28 @@ export function when<T>(
  * });
  * ```
  */
-export function unless<T>(
+export function unless<T, C = unknown>(
   condition: boolean,
   operation: Operation<T>,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): Promise<T | undefined>;
 
 /**
  * Synchronous overload for unless when the operation returns a non-Promise value.
  */
-export function unless<T>(
+export function unless<T, C = unknown>(
   condition: boolean,
   operation: () => T,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): T | undefined | Promise<T | undefined>;
 
-export function unless<T>(
+export function unless<T, C = unknown>(
   condition: boolean,
   operation: Operation<T>,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): MaybeAsync<T | undefined> {
   return when(!condition, operation, options, ctx);
 }
@@ -243,31 +260,31 @@ export function unless<T>(
  * });
  * ```
  */
-export function whenOr<T, D>(
+export function whenOr<T, D, C = unknown>(
   condition: boolean,
   operation: Operation<T>,
   defaultValue: D,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): Promise<T | D>;
 
 /**
  * Synchronous overload for whenOr when the operation returns a non-Promise value.
  */
-export function whenOr<T, D>(
+export function whenOr<T, D, C = unknown>(
   condition: boolean,
   operation: () => T,
   defaultValue: D,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): T | D | Promise<T | D>;
 
-export function whenOr<T, D>(
+export function whenOr<T, D, C = unknown>(
   condition: boolean,
   operation: Operation<T>,
   defaultValue: D,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): MaybeAsync<T | D> {
   if (condition) {
     return operation();
@@ -308,31 +325,31 @@ export function whenOr<T, D>(
  * });
  * ```
  */
-export function unlessOr<T, D>(
+export function unlessOr<T, D, C = unknown>(
   condition: boolean,
   operation: Operation<T>,
   defaultValue: D,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): Promise<T | D>;
 
 /**
  * Synchronous overload for unlessOr when the operation returns a non-Promise value.
  */
-export function unlessOr<T, D>(
+export function unlessOr<T, D, C = unknown>(
   condition: boolean,
   operation: () => T,
   defaultValue: D,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): T | D | Promise<T | D>;
 
-export function unlessOr<T, D>(
+export function unlessOr<T, D, C = unknown>(
   condition: boolean,
   operation: Operation<T>,
   defaultValue: D,
   options?: ConditionalOptions,
-  ctx?: ConditionalContext
+  ctx?: ConditionalContext<C>
 ): MaybeAsync<T | D> {
   return whenOr(!condition, operation, defaultValue, options, ctx);
 }
@@ -347,13 +364,14 @@ export function unlessOr<T, D>(
  * Use this factory when you want to automatically emit step_skipped events
  * to the workflow's event stream without passing context manually.
  *
- * @param ctx - The workflow context containing workflowId and onEvent
+ * @param ctx - The workflow context containing workflowId, onEvent, and optional context
  * @returns Object with bound when, unless, whenOr, and unlessOr functions
  *
  * @example
  * ```typescript
+ * // With run() - context is automatically included in events
  * const result = await run(async (step) => {
- *   const ctx = { workflowId, onEvent };
+ *   const ctx = { workflowId, onEvent, context: requestContext };
  *   const { when, whenOr } = createConditionalHelpers(ctx);
  *
  *   const user = await step(fetchUser(id));
@@ -365,10 +383,18 @@ export function unlessOr<T, D>(
  *   );
  *
  *   return { user, premium };
- * }, { onEvent, workflowId });
+ * }, { onEvent, workflowId, context: requestContext });
+ * 
+ * // With createWorkflow - access context from onEvent callback
+ * const workflow = createWorkflow({ fetchUser }, {
+ *   createContext: () => ({ requestId: 'req-123' }),
+ *   onEvent: (event, ctx) => {
+ *     // ctx is available here, can be passed to conditional helpers
+ *   }
+ * });
  * ```
  */
-export function createConditionalHelpers(ctx: ConditionalContext) {
+export function createConditionalHelpers<C = unknown>(ctx: ConditionalContext<C>) {
   return {
     /**
      * Run a step only if condition is true, return undefined if skipped.

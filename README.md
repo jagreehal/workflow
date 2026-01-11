@@ -580,6 +580,250 @@ if (!result.ok && isPendingApproval(result.error)) {
 | **Events** | `onEvent` streams everything - timing, retries, failures - for visualization or logging |
 | **Resume** | Save completed steps, pick up later (great for approvals or crashes) |
 | **UnexpectedError** | Safety net for throws outside your declared union; use `strict` mode to force explicit handling |
+| **TaggedError** | Factory for rich error types with exhaustive pattern matching |
+
+## Tagged Errors: When String Literals Aren't Enough
+
+String literal errors like `'NOT_FOUND'` are perfect for simple cases. But sometimes you need **rich error objects** with contextual data. That's where `TaggedError` shines.
+
+### When to Use What
+
+| Use Case | Recommendation |
+|----------|----------------|
+| Simple, distinct error states | String literals: `'NOT_FOUND' \| 'UNAUTHORIZED'` |
+| Errors with contextual data | TaggedError: `NotFoundError { id, resource }` |
+| Multiple error variants to handle | TaggedError with `match()` for exhaustive handling |
+| API responses or user messages | TaggedError for structured error details |
+
+### String Literals (Simple Cases)
+
+For most workflows, string literals are cleaner and simpler:
+
+```typescript
+const fetchUser = async (id: string): AsyncResult<User, 'NOT_FOUND' | 'DB_ERROR'> =>
+  id ? ok({ id, name: 'Alice' }) : err('NOT_FOUND');
+
+const result = await workflow(async (step) => {
+  const user = await step(fetchUser('123'));
+  return user;
+});
+
+if (!result.ok) {
+  switch (result.error) {
+    case 'NOT_FOUND': return res.status(404).send('User not found');
+    case 'DB_ERROR': return res.status(500).send('Database error');
+  }
+}
+```
+
+### TaggedError (Rich Error Objects)
+
+Use `TaggedError` when you need to carry additional context:
+
+```typescript
+import { TaggedError, ok, err, type AsyncResult } from '@jagreehal/workflow';
+
+// Pattern 1: Props via generic (default message = tag name)
+class NotFoundError extends TaggedError('NotFoundError')<{
+  resource: string;
+  id: string;
+}> {}
+
+// Pattern 2: Type-safe message (Props inferred from callback annotation)
+class ValidationError extends TaggedError('ValidationError', {
+  message: (p: { field: string; reason: string }) => `Validation failed for ${p.field}: ${p.reason}`,
+}) {}
+
+class RateLimitError extends TaggedError('RateLimitError', {
+  message: (p: { retryAfter: number }) => `Rate limited. Retry after ${p.retryAfter}s`,
+}) {}
+
+// Runtime type checks work!
+const error = new NotFoundError({ resource: 'User', id: '123' });
+console.log(error instanceof TaggedError); // true
+
+// Use in your functions
+type UserError = NotFoundError | ValidationError | RateLimitError;
+
+const fetchUser = async (id: string): AsyncResult<User, UserError> => {
+  if (!id) return err(new ValidationError({ field: 'id', reason: 'required' }));
+  if (id === 'limited') return err(new RateLimitError({ retryAfter: 60 }));
+  if (id === 'missing') return err(new NotFoundError({ resource: 'User', id }));
+  return ok({ id, name: 'Alice' });
+};
+```
+
+### Exhaustive Matching with `TaggedError.match()`
+
+TypeScript enforces you handle **every** error variant:
+
+```typescript
+const result = await workflow(async (step) => {
+  const user = await step(fetchUser('123'));
+  return user;
+});
+
+if (!result.ok) {
+  // TypeScript enforces all variants are handled
+  const response = TaggedError.match(result.error, {
+    NotFoundError: (e) => ({
+      status: 404,
+      body: { error: 'not_found', resource: e.resource, id: e.id },
+    }),
+    ValidationError: (e) => ({
+      status: 400,
+      body: { error: 'validation', field: e.field, reason: e.reason },
+    }),
+    RateLimitError: (e) => ({
+      status: 429,
+      body: { error: 'rate_limited', retryAfter: e.retryAfter },
+    }),
+  });
+
+  return res.status(response.status).json(response.body);
+}
+```
+
+**Add a new error type? TypeScript will error until you handle it.** This catches bugs at compile time, not production.
+
+### Partial Matching with Fallback
+
+Handle specific errors and catch-all for the rest:
+
+```typescript
+const message = TaggedError.matchPartial(
+  result.error,
+  {
+    RateLimitError: (e) => `Please wait ${e.retryAfter} seconds`,
+  },
+  (e) => `Something went wrong: ${e.message}`  // Fallback for other errors
+);
+```
+
+### Real-World Example: Payment Errors
+
+```typescript
+// Type-safe message with Props inferred from callback annotation
+class PaymentDeclinedError extends TaggedError('PaymentDeclinedError', {
+  message: (p: {
+    code: string;
+    declineReason: 'insufficient_funds' | 'card_expired' | 'fraud_suspected';
+  }) => `Payment declined: ${p.declineReason}`,
+}) {}
+
+class PaymentProviderError extends TaggedError('PaymentProviderError', {
+  message: (p: { provider: string; statusCode: number }) => `${p.provider} returned ${p.statusCode}`,
+}) {}
+
+type PaymentError = PaymentDeclinedError | PaymentProviderError;
+
+// In your workflow
+if (!result.ok) {
+  TaggedError.match(result.error, {
+    PaymentDeclinedError: (e) => {
+      switch (e.declineReason) {
+        case 'insufficient_funds': notifyUser('Please use a different card');
+        case 'card_expired': notifyUser('Your card has expired');
+        case 'fraud_suspected': alertFraudTeam(e);
+      }
+    },
+    PaymentProviderError: (e) => {
+      logToDatadog({ provider: e.provider, status: e.statusCode });
+      retryWithBackup(e.provider);
+    },
+  });
+}
+```
+
+### Type Helpers
+
+```typescript
+import { type TagOf, type ErrorByTag } from '@jagreehal/workflow';
+
+type PaymentError = PaymentDeclinedError | PaymentProviderError;
+
+// Extract the tag literal type
+type Tags = TagOf<PaymentError>;  // 'PaymentDeclinedError' | 'PaymentProviderError'
+
+// Extract a specific variant from the union
+type Declined = ErrorByTag<PaymentError, 'PaymentDeclinedError'>;  // PaymentDeclinedError
+```
+
+### Reserved Keys & Cause Handling
+
+**Reserved property names** are stripped from props to preserve Error semantics:
+
+| Key | Reason |
+|-----|--------|
+| `_tag` | Discriminant for pattern matching (cannot be forged) |
+| `name` | Error.name (shown in stack traces/logs) |
+| `message` | Error.message (shown in logs/telemetry) |
+| `stack` | Error.stack (the stack trace) |
+
+```typescript
+// These reserved keys are silently stripped - use different names!
+class BadExample extends TaggedError('BadExample')<{
+  message: string;  // ❌ Won't work - use 'details' or 'description' instead
+  id: string;
+}> {}
+
+// Better approach:
+class GoodExample extends TaggedError('GoodExample')<{
+  details: string;  // ✅ Custom prop name
+  id: string;
+}> {}
+```
+
+**The `cause` property** is special - it can be used as a user prop for domain data:
+
+```typescript
+// cause as domain data (e.g., structured validation errors)
+class ValidationError extends TaggedError('ValidationError')<{
+  cause: { field: string; reason: string };  // ✅ Allowed as user prop
+}> {}
+
+const error = new ValidationError({
+  cause: { field: 'email', reason: 'invalid format' },
+});
+console.log(error.cause);  // { field: 'email', reason: 'invalid format' }
+```
+
+**Conflict detection**: You cannot provide `cause` in both props AND ErrorOptions:
+
+```typescript
+// This throws TypeError at runtime!
+const error = new ValidationError(
+  { cause: { field: 'email', reason: 'invalid' } },  // cause in props
+  { cause: new Error('original') }                    // cause in options
+);
+// TypeError: cannot provide 'cause' in props when also setting ErrorOptions.cause
+```
+
+Use ErrorOptions.cause for error chaining (linking to the original error):
+
+```typescript
+class NetworkError extends TaggedError('NetworkError')<{
+  url: string;
+  statusCode: number;
+}> {}
+
+try {
+  await fetch('/api');
+} catch (original) {
+  // Chain to original error via ErrorOptions (not props)
+  throw new NetworkError(
+    { url: '/api', statusCode: 500 },
+    { cause: original }  // ✅ Error chaining
+  );
+}
+```
+
+### Summary
+
+- **String literals**: Simple, great for distinct states without extra data
+- **TaggedError**: Rich errors with context, exhaustive matching, proper stack traces
+- **`match()`**: Forces you to handle every variant (compile-time safety)
+- **`matchPartial()`**: Handle some variants with a catch-all fallback
 
 ## Recipes & Patterns
 

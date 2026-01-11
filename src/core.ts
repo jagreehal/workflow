@@ -3450,6 +3450,80 @@ export async function recoverAsync<T, E, C>(
 }
 
 // =============================================================================
+// Result Hydration (Serialization)
+// =============================================================================
+
+/**
+ * Validates and type-narrows a value to a Result.
+ *
+ * Since this library uses plain objects for Results, serialization is trivial -
+ * the serialized form IS the Result. This function validates the structure and
+ * provides type-safe narrowing.
+ *
+ * ## When to Use
+ *
+ * Use `hydrate()` when:
+ * - Receiving Results over RPC/network
+ * - Deserializing Results from storage
+ * - Validating untrusted data as Results
+ *
+ * @param value - The unknown value to validate as a Result
+ * @returns The value as a typed Result, or null if invalid
+ *
+ * @example
+ * ```typescript
+ * // Deserialize from JSON
+ * const parsed = JSON.parse(jsonString);
+ * const result = hydrate<User, ApiError>(parsed);
+ * if (result) {
+ *   // result is Result<User, ApiError>
+ * }
+ *
+ * // Validate RPC response
+ * const rpcResponse = await fetchFromService();
+ * const result = hydrate<Data, ServiceError>(rpcResponse);
+ * ```
+ */
+export function hydrate<T, E, C = unknown>(value: unknown): Result<T, E, C> | null {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "ok" in value &&
+    typeof value.ok === "boolean"
+  ) {
+    if (value.ok === true && "value" in value) {
+      return value as Result<T, E, C>;
+    }
+    if (value.ok === false && "error" in value) {
+      return value as Result<T, E, C>;
+    }
+  }
+  return null;
+}
+
+/**
+ * Type guard to check if a value is a valid serialized Result.
+ *
+ * @param value - The value to check
+ * @returns True if the value is a valid Result structure
+ *
+ * @example
+ * ```typescript
+ * if (isSerializedResult(data)) {
+ *   // data is Result<unknown, unknown, unknown>
+ *   if (data.ok) {
+ *     console.log(data.value);
+ *   }
+ * }
+ * ```
+ */
+export function isSerializedResult(
+  value: unknown
+): value is Result<unknown, unknown, unknown> {
+  return hydrate(value) !== null;
+}
+
+// =============================================================================
 // Batch Operations
 // =============================================================================
 

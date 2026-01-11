@@ -21,6 +21,9 @@ import {
   ErrorsOfDeps,
   allAsync,
   type WorkflowEvent,
+  TaggedError,
+  type TagOf,
+  type ErrorByTag,
 } from "./index";
 
 // =============================================================================
@@ -1008,15 +1011,216 @@ function _testWorkflowEventContextGeneric() {
   );
 
   type StepErrorEvent = Extract<EventWithContext, { type: "step_error" }>;
-  expectType<{ 
-    type: "step_error"; 
-    workflowId: string; 
-    stepId: string; 
-    stepKey?: string; 
-    name?: string; 
-    ts: number; 
-    durationMs: number; 
+  expectType<{
+    type: "step_error";
+    workflowId: string;
+    stepId: string;
+    stepKey?: string;
+    name?: string;
+    ts: number;
+    durationMs: number;
     error: AppError;
     context?: RequestContext;
   }>({} as StepErrorEvent);
+}
+
+// =============================================================================
+// TEST: TaggedError type utilities
+// =============================================================================
+
+// Pattern 1: Props via generic (default message = tag)
+class TestNotFoundError extends TaggedError("NotFoundError")<{ id: string }> {}
+
+// Pattern 2: Props inferred from message callback annotation
+class TestValidationError extends TaggedError("ValidationError", {
+  message: (p: { field: string }) => `Invalid: ${p.field}`,
+}) {}
+
+class TestNetworkError extends TaggedError("NetworkError", {
+  message: (p: { statusCode: number }) => `Network error: ${p.statusCode}`,
+}) {}
+
+type TestError = TestNotFoundError | TestValidationError | TestNetworkError;
+
+// =============================================================================
+// TEST: Constructor requires props when Props has required fields
+// =============================================================================
+
+function _testConstructorRequiredProps() {
+  // Error with required props - must provide argument
+  class RequiredError extends TaggedError("RequiredError")<{ id: string }> {}
+  new RequiredError({ id: "123" }); // OK
+  // @ts-expect-error - required props cannot be omitted
+  new RequiredError();
+  // @ts-expect-error - required props cannot be omitted (undefined not allowed)
+  new RequiredError(undefined);
+
+  // Error with all optional props - can omit argument
+  class OptionalError extends TaggedError("OptionalError")<{
+    code?: number;
+    detail?: string;
+  }> {}
+  new OptionalError(); // OK - all props optional
+  new OptionalError({}); // OK
+  new OptionalError({ code: 404 }); // OK
+
+  // Error with no props - can omit argument
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
+  class EmptyError extends TaggedError("EmptyError")<{}> {}
+  new EmptyError(); // OK - no props
+  new EmptyError({}); // OK
+
+  // Pattern 2 (with message) - required props must be provided
+  // @ts-expect-error - required props cannot be omitted
+  new TestValidationError();
+  new TestValidationError({ field: "email" }); // OK
+}
+
+// =============================================================================
+// TEST: TagOf extracts the _tag literal type
+// =============================================================================
+
+function _testTagOf() {
+  type NotFoundTag = TagOf<TestNotFoundError>;
+  expectType<"NotFoundError">({} as NotFoundTag);
+
+  type ValidationTag = TagOf<TestValidationError>;
+  expectType<"ValidationError">({} as ValidationTag);
+
+  // Union of tags
+  type AllTags = TagOf<TestError>;
+  expectType<"NotFoundError" | "ValidationError" | "NetworkError">({} as AllTags);
+}
+
+// =============================================================================
+// TEST: ErrorByTag extracts specific variant from union
+// =============================================================================
+
+function _testErrorByTag() {
+  type NotFound = ErrorByTag<TestError, "NotFoundError">;
+  expectType<TestNotFoundError>({} as NotFound);
+
+  type Validation = ErrorByTag<TestError, "ValidationError">;
+  expectType<TestValidationError>({} as Validation);
+
+  type Network = ErrorByTag<TestError, "NetworkError">;
+  expectType<TestNetworkError>({} as Network);
+}
+
+// =============================================================================
+// TEST: TaggedError.match() return type inference
+// =============================================================================
+
+function _testMatchReturnType(error: TestError) {
+  // All handlers return same type
+  const result1 = TaggedError.match(error, {
+    NotFoundError: () => 404,
+    ValidationError: () => 400,
+    NetworkError: () => 500,
+  });
+  expectType<number>(result1);
+
+  // Handlers return different types - union
+  const result2 = TaggedError.match(error, {
+    NotFoundError: () => 404,
+    ValidationError: () => "bad request",
+    NetworkError: () => null,
+  });
+  expectType<number | string | null>(result2);
+
+  // Handlers receive correctly narrowed error type
+  TaggedError.match(error, {
+    NotFoundError: (e) => {
+      expectType<TestNotFoundError>(e);
+      expectType<string>(e.id);
+      return null;
+    },
+    ValidationError: (e) => {
+      expectType<TestValidationError>(e);
+      expectType<string>(e.field);
+      return null;
+    },
+    NetworkError: (e) => {
+      expectType<TestNetworkError>(e);
+      expectType<number>(e.statusCode);
+      return null;
+    },
+  });
+}
+
+// =============================================================================
+// TEST: TaggedError.matchPartial() return type inference
+// This was the bug - return type collapsed to just fallback type T
+// =============================================================================
+
+function _testMatchPartialReturnType(error: TestError) {
+  // Handler returns number, fallback returns string
+  // Return type should be number | string, NOT just string
+  const result1 = TaggedError.matchPartial(
+    error,
+    {
+      NotFoundError: () => 404,
+    },
+    () => "default"
+  );
+  expectType<number | string>(result1);
+
+  // Multiple handlers with different return types
+  const result2 = TaggedError.matchPartial(
+    error,
+    {
+      NotFoundError: () => 404,
+      ValidationError: () => true,
+    },
+    () => "fallback"
+  );
+  expectType<number | boolean | string>(result2);
+
+  // All handlers same type, fallback different
+  const result3 = TaggedError.matchPartial(
+    error,
+    {
+      NotFoundError: () => 404,
+      ValidationError: () => 400,
+    },
+    () => null
+  );
+  expectType<number | null>(result3);
+
+  // Handler and fallback same type
+  const result4 = TaggedError.matchPartial(
+    error,
+    {
+      NotFoundError: () => "not found",
+    },
+    () => "other"
+  );
+  expectType<string>(result4);
+
+  // Inline handlers: fallback IS narrowed to unhandled variants
+  TaggedError.matchPartial(
+    error,
+    {
+      NotFoundError: () => null,
+      ValidationError: () => null,
+    },
+    (e) => {
+      // e is narrowed to NetworkError only (the unhandled variant)
+      expectType<TestNetworkError>(e);
+      return null;
+    }
+  );
+
+  // Wider-typed variable: fallback receives full error type
+  // (DefinitelyHandledKeys only excludes keys with non-undefined values)
+  const handlers: Partial<{
+    [K in TestError["_tag"]]: (e: Extract<TestError, { _tag: K }>) => number;
+  }> = {
+    NotFoundError: () => 404,
+  };
+  TaggedError.matchPartial(error, handlers, (e) => {
+    // e is the full TestError type since handlers type allows undefined values
+    expectType<TestError>(e);
+    return "fallback";
+  });
 }

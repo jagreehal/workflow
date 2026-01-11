@@ -154,7 +154,31 @@ export {
 
   // Run
   run,
+
+  // Hydration / Serialization
+  hydrate,
+  isSerializedResult,
 } from "./core";
+
+// =============================================================================
+// Tagged Errors
+// =============================================================================
+
+export {
+  // Factory function
+  TaggedError,
+
+  // Types
+  type TaggedErrorBase,
+  type TaggedErrorOptions,
+  type TaggedErrorCreateOptions,
+  type TaggedErrorConstructor,
+
+  // Type utilities
+  type TagOf,
+  type ErrorByTag,
+  type PropsOf,
+} from "./tagged-error";
 
 // =============================================================================
 // Workflow - createWorkflow

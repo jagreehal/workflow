@@ -1,5 +1,70 @@
 # @jagreehal/workflow
 
+## 1.8.0
+
+### Minor Changes
+
+- af48f01: Add TaggedError factory function for structured error types with exhaustive pattern matching
+
+  **New Feature:**
+
+  - `TaggedError` factory function creates tagged error classes with type-safe pattern matching
+  - Two usage patterns:
+    1. Props via generic: `class NotFoundError extends TaggedError("NotFoundError")<{ id: string }> {}`
+    2. Props inferred from message callback: `class ValidationError extends TaggedError("ValidationError", { message: (p: { field: string }) => ... }) {}`
+  - Exhaustive pattern matching with `TaggedError.match()` - TypeScript enforces all variants are handled
+  - Partial matching with `TaggedError.matchPartial()` for catch-all scenarios
+  - Type-safe message generation from props (optional)
+  - `instanceof TaggedError` checks work via `Symbol.hasInstance`
+  - Framework-agnostic alternative to Effect.js `Data.TaggedError`
+
+  **API:**
+
+  - `TaggedError(tag)` - Factory function returning class constructor
+  - `TaggedError.match(error, handlers)` - Exhaustive pattern matching
+  - `TaggedError.matchPartial(error, handlers, otherwise)` - Partial matching with fallback
+  - `TaggedError.isTaggedError(value)` - Type guard
+  - Helper types: `TagOf<E>`, `ErrorByTag<E, Tag>`, `PropsOf<E>`
+
+  **Use Cases:**
+
+  - Errors with contextual data (e.g., `NotFoundError { id, resource }`)
+  - Multiple error variants requiring exhaustive handling
+  - API responses or user messages with structured error details
+  - When string literals aren't sufficient for error context
+
+  **Documentation:**
+
+  - Added comprehensive examples in README showing when to use TaggedError vs string literals
+  - Clear guidance: use string literals for simple cases, TaggedError for rich error objects
+
+- e61464b: Add context propagation to workflow events and conditional helpers
+
+  **New Features:**
+
+  - Context is now automatically included in all workflow events when provided via `createContext` or `context` option
+  - `WorkflowContext` parameter added to `createWorkflow` callbacks (always provided) containing `workflowId`, `onEvent`, and `context`
+  - Conditional helpers (`when`, `unless`, `whenOr`, `unlessOr`) now support context propagation in `step_skipped` events
+  - `createConditionalHelpers` accepts `WorkflowContext` directly (same shape as `ConditionalContext`)
+
+  **Improvements:**
+
+  - Simplified conditional helper usage with `createWorkflow` - pass `ctx` directly to `createConditionalHelpers(ctx)`
+  - Better type safety - `ctx` is always provided, no need for null checks
+  - All events maintain context correlation for better observability
+
+  **Breaking Changes:**
+
+  - `WorkflowEvent<E, C>` default context generic changed from `void` to `unknown` (makes context visible to existing consumers)
+  - `onError` callbacks now receive `ctx` as third parameter: `(error, stepName?, ctx?) => void`
+  - `onEvent` callbacks receive context as second parameter: `(event, ctx) => void`
+
+  **Backward Compatibility:**
+
+  - Existing code without context continues to work
+  - `ctx` parameter in `createWorkflow` callbacks can be ignored if not needed
+  - All existing tests pass without modification
+
 ## 1.7.0
 
 ### Minor Changes

@@ -26,6 +26,16 @@
       "types": "./dist/visualize.d.ts",
       "import": "./dist/visualize.js",
       "require": "./dist/visualize.cjs"
+    },
+    "./batch": {
+      "types": "./dist/batch.d.ts",
+      "import": "./dist/batch.js",
+      "require": "./dist/batch.cjs"
+    },
+    "./resource": {
+      "types": "./dist/resource.d.ts",
+      "import": "./dist/resource.js",
+      "require": "./dist/resource.cjs"
     }
   },
   "files": [

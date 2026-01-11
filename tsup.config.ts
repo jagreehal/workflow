@@ -6,6 +6,8 @@ export default defineConfig({
     core: 'src/core.ts',
     workflow: 'src/workflow.ts',
     visualize: 'src/visualize/index.ts',
+    batch: 'src/batch.ts',
+    resource: 'src/resource.ts',
   },
   format: ['cjs', 'esm'],
   dts: true,

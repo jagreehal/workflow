@@ -90,14 +90,5 @@ lib/
 .DS_Store
 dist
 
-# Monorepo
-apps/*/node_modules/
-apps/*/.next/
-apps/*/build/
-apps/*/dist/
-apps/*/.astro/
-apps/*/.svelte-kit/
-apps/*/.vercel/
-packages/*/node_modules/
-packages/*/dist/
-packages/*/lib/
+
+tmp

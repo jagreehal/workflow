@@ -92,3 +92,5 @@ dist
 
 
 tmp
+.playwright-mcp
+docs-site/

@@ -578,3 +578,41 @@ export {
   errOutcome,
   throwOutcome,
 } from "./testing";
+
+// =============================================================================
+// Batch Processing
+// =============================================================================
+
+export {
+  // Types
+  type BatchConfig,
+  type BatchProgress,
+  type BatchOptions,
+  type BatchProcessingError,
+  type InvalidBatchConfigError,
+
+  // Functions
+  processInBatches,
+  isBatchProcessingError,
+  isInvalidBatchConfigError,
+
+  // Presets
+  batchPresets,
+} from "./batch";
+
+// =============================================================================
+// Resource Management
+// =============================================================================
+
+export {
+  // Types
+  type Resource,
+  type ResourceScope,
+  type ResourceCleanupError,
+
+  // Functions
+  createResourceScope,
+  withScope,
+  createResource,
+  isResourceCleanupError,
+} from "./resource";

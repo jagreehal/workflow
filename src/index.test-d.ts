@@ -26,6 +26,11 @@ import {
   TaggedError,
   type TagOf,
   type ErrorByTag,
+  isOk,
+  isErr,
+  recover,
+  recoverAsync,
+  pendingApproval,
 } from "./index";
 
 // =============================================================================
@@ -194,6 +199,63 @@ function _test6() {
     expectType<"ERROR">(withCause.error);
     // Cause is typed and accessible
     expectType<Error | undefined>(withCause.cause);
+  }
+}
+
+// =============================================================================
+// TEST 6b: isOk() and isErr() type guards with clean predicates
+// =============================================================================
+
+function _test6b() {
+  const result: Result<number, "NOT_FOUND", Error> = ok(42);
+
+  // isOk() narrows to Ok<T> - clean predicate, not { ok: true; value: T }
+  if (isOk(result)) {
+    expectType<Ok<number>>(result);
+    expectType<number>(result.value);
+  }
+
+  // isErr() narrows to Err<E, C> - clean predicate, not { ok: false; error: E; cause?: C }
+  if (isErr(result)) {
+    expectType<Err<"NOT_FOUND", Error>>(result);
+    expectType<"NOT_FOUND">(result.error);
+    expectType<Error | undefined>(result.cause);
+  }
+}
+
+// =============================================================================
+// TEST 6c: recover() and recoverAsync() return Ok<T>
+// =============================================================================
+
+function _test6c() {
+  const mayFail: Result<number, "NOT_FOUND"> = err("NOT_FOUND");
+
+  // recover() always returns Ok<T> - clean type, not Result<number, never, never>
+  const recovered = recover(mayFail, () => 0);
+  expectType<Ok<number>>(recovered);
+  expectType<number>(recovered.value);
+}
+
+async function _test6cAsync() {
+  const mayFail: Result<number, "NOT_FOUND"> = err("NOT_FOUND");
+
+  // recoverAsync() returns Promise<Ok<T>> - clean type
+  const recovered = await recoverAsync(mayFail, async () => 0);
+  expectType<Ok<number>>(recovered);
+  expectType<number>(recovered.value);
+}
+
+// =============================================================================
+// TEST 6d: pendingApproval() returns Err<PendingApproval>
+// =============================================================================
+
+function _test6d() {
+  // pendingApproval() returns Err<PendingApproval> - clean type
+  const pending = pendingApproval("approval-key");
+  expectType<Err<{ type: "PENDING_APPROVAL"; stepKey: string; reason?: string; metadata?: Record<string, unknown> }>>(pending);
+  if (!pending.ok) {
+    expectType<"PENDING_APPROVAL">(pending.error.type);
+    expectType<string>(pending.error.stepKey);
   }
 }
 

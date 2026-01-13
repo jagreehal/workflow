@@ -165,8 +165,7 @@ export const err = <E, C = unknown>(
  * }
  * ```
  */
-export const isOk = <T, E, C>(r: Result<T, E, C>): r is { ok: true; value: T } =>
-  r.ok;
+export const isOk = <T, E, C>(r: Result<T, E, C>): r is Ok<T> => r.ok;
 
 /**
  * Checks if a Result is a failure.
@@ -184,9 +183,7 @@ export const isOk = <T, E, C>(r: Result<T, E, C>): r is { ok: true; value: T } =
  * // Proceed with success case
  * ```
  */
-export const isErr = <T, E, C>(
-  r: Result<T, E, C>
-): r is { ok: false; error: E; cause?: C } => !r.ok;
+export const isErr = <T, E, C>(r: Result<T, E, C>): r is Err<E, C> => !r.ok;
 
 /**
  * Checks if an error is an UnexpectedError.
@@ -3445,7 +3442,7 @@ export async function orElseAsync<T, E, E2, C, C2>(
 export function recover<T, E, C>(
   r: Result<T, E, C>,
   fn: (error: E, cause?: C) => T
-): Result<T, never, never> {
+): Ok<T> {
   return r.ok ? ok(r.value) : ok(fn(r.error, r.cause));
 }
 
@@ -3468,7 +3465,7 @@ export function recover<T, E, C>(
 export async function recoverAsync<T, E, C>(
   r: Result<T, E, C> | Promise<Result<T, E, C>>,
   fn: (error: E, cause?: C) => T | Promise<T>
-): Promise<Result<T, never, never>> {
+): Promise<Ok<T>> {
   const resolved = await r;
   if (resolved.ok) return ok(resolved.value);
   return ok(await fn(resolved.error, resolved.cause));

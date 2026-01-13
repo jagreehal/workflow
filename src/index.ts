@@ -69,6 +69,8 @@
 
 export {
   // Types
+  type Ok,
+  type Err,
   type Result,
   type AsyncResult,
   type UnexpectedError,

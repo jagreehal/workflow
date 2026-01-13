@@ -23,6 +23,7 @@ import {
   type TimeoutOptions,
   type ErrorOf,
   type CauseOf,
+  type Err,
 } from "./core";
 
 // Re-export types that workflow users commonly need
@@ -236,7 +237,7 @@ function encodeCachedError<E, C>(
   error: E,
   meta: StepFailureMeta,
   originalCause: C
-): Result<never, E, CachedErrorCause<C>> {
+): Err<E, CachedErrorCause<C>> {
   return err(error, {
     cause: { __cachedMeta: true, originalCause, meta } as CachedErrorCause<C>,
   });
@@ -1400,7 +1401,7 @@ export function isApprovalRejected(error: unknown): error is ApprovalRejected {
 export function pendingApproval(
   stepKey: string,
   options?: { reason?: string; metadata?: Record<string, unknown> }
-): Result<never, PendingApproval> {
+): Err<PendingApproval> {
   return err({
     type: "PENDING_APPROVAL",
     stepKey,

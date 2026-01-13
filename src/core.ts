@@ -16,6 +16,34 @@
 // =============================================================================
 
 /**
+ * Represents a successful result.
+ * Use `ok(value)` to create instances.
+ *
+ * @template T - The type of the success value
+ *
+ * @example
+ * ```typescript
+ * const success = ok(42);
+ * // Type shown: Ok<number>
+ * ```
+ */
+export type Ok<T> = { ok: true; value: T };
+
+/**
+ * Represents a failed result.
+ * Use `err(error)` to create instances.
+ *
+ * @template E - The type of the error value
+ *
+ * @example
+ * ```typescript
+ * const failure = err({ type: "NOT_FOUND", message: "User not found" });
+ * // Type shown: Err<{ type: string; message: string }>
+ * ```
+ */
+export type Err<E, C = unknown> = { ok: false; error: E; cause?: C };
+
+/**
  * Represents a successful computation or a failed one.
  * Use this type to represent the outcome of an operation that might fail,
  * instead of throwing exceptions.
@@ -71,48 +99,48 @@ export type MaybeAsyncResult<T, E, C = unknown> = Result<T, E, C> | Promise<Resu
  * Use this when an operation completes successfully.
  *
  * @param value - The success value to wrap
- * @returns A Result object with `{ ok: true, value }`
+ * @returns An Ok object with `{ ok: true, value }`
  *
  * @example
  * ```typescript
+ * const success = ok(42);
+ * // Type: Ok<number>
+ *
  * function divide(a: number, b: number): Result<number, string> {
  *   if (b === 0) return err("Division by zero");
  *   return ok(a / b);
  * }
  * ```
  */
-export const ok = <T>(value: T): Result<T, never, never> => ({ ok: true, value });
+export const ok = <T>(value: T): Ok<T> => ({ ok: true, value });
 
 /**
  * Creates a failed Result.
  * Use this when an operation fails.
  *
  * @param error - The error value describing what went wrong (e.g., error code, object)
- * @param options - Optional context about the failure
- * @param options.cause - The underlying cause of the error (e.g., a caught exception)
- * @returns A Result object with `{ ok: false, error }` (and optional cause)
+ * @returns An Err object with `{ ok: false, error }`
  *
  * @example
  * ```typescript
  * // Simple error
  * const r1 = err("NOT_FOUND");
+ * // Type: Err<"NOT_FOUND">
  *
- * // Error with cause (useful for wrapping exceptions)
- * try {
- *   // ... unsafe code
- * } catch (e) {
- *   return err("PROCESSING_FAILED", { cause: e });
- * }
+ * // Error with context (include in error object)
+ * const r2 = err({ type: "PROCESSING_FAILED", cause: originalError });
+ * // Type: Err<{ type: string; cause: Error }>
  * ```
  */
 export const err = <E, C = unknown>(
   error: E,
   options?: { cause?: C }
-): Result<never, E, C> => ({
-  ok: false,
-  error,
-  ...(options?.cause !== undefined ? { cause: options.cause } : {}),
-});
+): Err<E, C> =>
+  ({
+    ok: false,
+    error,
+    ...(options?.cause !== undefined ? { cause: options.cause } : {}),
+  }) as Err<E, C>;
 
 // =============================================================================
 // Type Guards
@@ -1370,13 +1398,6 @@ export async function run<T, E, C = void>(
     };
   };
 
-  const causeFromMeta = (meta: StepFailureMeta): unknown => {
-    if (meta.origin === "result") {
-      return meta.resultCause;
-    }
-    return meta.thrown;
-  };
-
   const unexpectedFromFailure = (failure: EarlyExit<E>): UnexpectedError => ({
     type: "UNEXPECTED_ERROR",
     cause:
@@ -2314,17 +2335,21 @@ export async function run<T, E, C = void>(
     }
 
     if (isEarlyExitE(error)) {
-      const failureCause = causeFromMeta(error.meta);
+      // Extract original cause from early exit metadata
+      const originalCause = error.meta.origin === "throw"
+        ? error.meta.thrown
+        : error.meta.resultCause;
+
       if (catchUnexpected || onError) {
-        return err(error.error, { cause: failureCause });
+        return err(error.error, { cause: originalCause });
       }
       // If the error is already an UnexpectedError (e.g., from resumed state),
       // return it directly without wrapping in another STEP_FAILURE
       if (isUnexpectedError(error.error)) {
-        return err(error.error, { cause: failureCause });
+        return err(error.error, { cause: originalCause });
       }
       const unexpectedError = unexpectedFromFailure(error);
-      return err(unexpectedError, { cause: failureCause });
+      return err(unexpectedError, { cause: originalCause });
     }
 
     if (catchUnexpected) {

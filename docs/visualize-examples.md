@@ -53,7 +53,7 @@ await workflow(async (step) => {
   const [user, posts] = await step.parallel('Fetch all data', async () => {
     const userResult = await step(() => fetchUser('1'), { name: 'Fetch user' });
     const postsResult = await step(() => fetchPosts('1'), { name: 'Fetch posts' });
-    return [userResult, postsResult];
+    return ok([userResult, postsResult]);
   });
   return { user, posts };
 });

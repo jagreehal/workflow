@@ -33,6 +33,36 @@ step.try(fn, { onError })           // Dynamic error from caught value
 step.try(fn, { error, name, key })  // With tracing options
 ```
 
+### step.fromResult
+
+```typescript
+step.fromResult(fn, { error })      // Map any Result error to static type
+step.fromResult(fn, { onError })    // Map Result error dynamically
+```
+
+### step.retry
+
+```typescript
+step.retry(fn, { attempts, backoff }) // Basic retry
+step.retry(fn, { attempts, timeout }) // Retry with per-attempt timeout
+```
+
+### step.withTimeout
+
+```typescript
+step.withTimeout(fn, { ms })        // Simple timeout
+step.withTimeout(fn, { ms, signal }) // With AbortSignal propagation
+```
+
+### step.parallel / step.race / step.allSettled
+
+```typescript
+step.parallel(name, () => ...)      // Parallel group with scope events
+step.parallel({ key: fn }, opts)    // Named object form
+step.race(name, () => ...)          // Race group with scope events
+step.allSettled(name, () => ...)    // allSettled group with scope events
+```
+
 ### Low-level run
 
 ```typescript

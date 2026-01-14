@@ -4,8 +4,11 @@ You already get it: **errors should be in the type system, not hidden behind `un
 
 The difference? neverthrow gives you typed Results. This library gives you typed Results *plus* orchestration—retries, timeouts, caching, resume, and visualization built in.
 
+This library **automatically infers error types** from your dependencies. No more manually tracking error unions—add a step, the union updates. Remove one? It updates. TypeScript enforces it at compile time.
+
 **TL;DR:**
 - `andThen` chains → `step()` calls with async/await
+- **Automatic error inference** — no manual union tracking
 - Same error-first mindset, different syntax
 - Keep your existing neverthrow code—they interop cleanly
 
@@ -15,10 +18,10 @@ The difference? neverthrow gives you typed Results. This library gives you typed
 |---|------------|---------------------|
 | **Mental model** | "The Realist" — explicit about what can fail | "The Orchestrator" — explicit failures + execution control |
 | **Syntax** | Functional chaining (`.andThen()`, `.map()`) | Imperative async/await with `step()` |
-| **Error inference** | Manual union types | Automatic from dependencies |
+| **Error inference** | ⚠️ **Manual union types** — you maintain them | ✅ **Automatic from dependencies** — always in sync |
 | **Orchestration** | DIY (retries, caching, timeouts) | Built-in primitives |
 
-Both make your functions *honest*—the signature says what can go wrong. The difference is in ergonomics and what's included.
+Both make your functions *honest*—the signature says what can go wrong. The key difference: **workflow eliminates the manual union tracking burden** while adding orchestration features.
 
 ---
 
@@ -104,6 +107,65 @@ async function loadDashboard(userId: string) {
 TypeScript sees this as returning `{ user, org }` or throwing `unknown`. All the real errors—NOT_FOUND, PERMISSION_DENIED, TIMEOUT—are erased.
 
 Both neverthrow and workflow fix this by making errors part of the return type.
+
+---
+
+## The manual union tracking problem
+
+**neverthrow's pain point:** You must manually declare and maintain error unions. Every time you add or remove a step, you update the type annotation:
+
+```typescript
+// ❌ Manual union tracking - easy to get out of sync
+type SignUpError = 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'DB_ERROR' | 'EMAIL_EXISTS';
+
+const signUp = (
+  email: string,
+  password: string
+): ResultAsync<User, SignUpError> =>
+  validateEmail(email)
+    .andThen(() => validatePassword(password))
+    .andThen(() => checkDuplicate(email))  // Oops! Forgot to add 'EMAIL_EXISTS' to SignUpError
+    .andThen(() => createUser(email, password));
+
+// TypeScript won't catch this - the error union is manually declared
+// You'll only find out at runtime when you try to handle 'EMAIL_EXISTS'
+```
+
+**What happens:**
+- Add a new step? Update the union manually
+- Remove a step? Update the union manually  
+- Forget to update? TypeScript won't catch it
+- Switch on an error that can't happen? TypeScript won't warn you
+- Miss handling a possible error? TypeScript won't warn you
+
+**workflow's solution:** Error types are **automatically inferred** from your dependencies:
+
+```typescript
+// ✅ Automatic inference - always in sync
+const signUp = createWorkflow({
+  validateEmail,    // returns AsyncResult<string, 'INVALID_EMAIL'>
+  validatePassword, // returns AsyncResult<string, 'WEAK_PASSWORD'>
+  checkDuplicate,   // returns AsyncResult<void, 'EMAIL_EXISTS'>
+  createUser,       // returns AsyncResult<User, 'DB_ERROR'>
+});
+
+const result = await signUp(async (step, deps) => {
+  const email = await step(deps.validateEmail('alice@example.com'));
+  const password = await step(deps.validatePassword('securepass123'));
+  await step(deps.checkDuplicate(email));
+  return await step(deps.createUser(email, password));
+});
+
+// TypeScript knows: Result<User, 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'EMAIL_EXISTS' | 'DB_ERROR' | UnexpectedError>
+// Add a step? Union updates automatically. Remove one? Updates automatically.
+// Switch on an impossible error? TypeScript error. Miss a possible error? TypeScript error.
+```
+
+**The difference:**
+- neverthrow: You maintain the error union manually (error-prone)
+- workflow: The error union is computed from your dependencies (always correct)
+
+This is especially valuable in complex workflows with 5+ steps where manual tracking becomes a maintenance burden.
 
 ---
 
@@ -426,10 +488,12 @@ const enrichedResult = mapError(userResult, error => ({
 
 ### Automatic error type inference
 
+> Error unions are computed automatically—no manual tracking, no drift, no bugs.
+
 **neverthrow** requires you to declare error unions explicitly:
 
 ```typescript
-// You MUST manually track the error union
+// ❌ You MUST manually track the error union
 type SignUpError = 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'DB_ERROR';
 
 const signUp = (
@@ -439,14 +503,27 @@ const signUp = (
   validateEmail(email)
     .andThen(() => validatePassword(password))
     .andThen(() => createUser(email, password));
+
+// What happens when you add a step?
+// 1. Add checkDuplicate() that returns 'EMAIL_EXISTS'
+// 2. Remember to update SignUpError type
+// 3. If you forget? TypeScript won't catch it
+// 4. Runtime error when you try to handle 'EMAIL_EXISTS'
 ```
+
+**The pain:**
+- Add a step? Update the union manually
+- Remove a step? Update the union manually
+- Forget to update? Silent type error
+- Switch on impossible error? No warning
+- Miss handling possible error? No warning
 
 **workflow** with `createWorkflow` infers them automatically:
 
 ```typescript
 import { createWorkflow } from '@jagreehal/workflow';
 
-// NO manual type annotation needed!
+// ✅ NO manual type annotation needed!
 const signUp = createWorkflow({
   validateEmail,    // returns AsyncResult<string, 'INVALID_EMAIL'>
   validatePassword, // returns AsyncResult<string, 'WEAK_PASSWORD'>
@@ -462,7 +539,23 @@ const result = await signUp(async (step, deps) => {
 // TypeScript knows: Result<User, 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'DB_ERROR' | UnexpectedError>
 ```
 
-The error union stays in sync as you add or remove steps.
+**Add a step?** The union updates automatically:
+```typescript
+// Add checkDuplicate - union updates automatically
+const signUp = createWorkflow({
+  validateEmail,
+  validatePassword,
+  checkDuplicate,  // returns AsyncResult<void, 'EMAIL_EXISTS'>
+  createUser,
+});
+
+// Now TypeScript knows: 'INVALID_EMAIL' | 'WEAK_PASSWORD' | 'EMAIL_EXISTS' | 'DB_ERROR' | UnexpectedError
+// No manual type update needed!
+```
+
+**Remove a step?** The union updates automatically. **Switch on impossible error?** TypeScript error. **Miss handling possible error?** TypeScript error.
+
+The error union **always** matches your actual dependencies. This becomes invaluable in complex workflows with 5+ steps where manual tracking becomes error-prone.
 
 ---
 
@@ -761,11 +854,11 @@ const data = await limiter.execute(async () => {
 Render workflow execution:
 
 ```typescript
-import { createIRBuilder, renderToAscii, renderToMermaid } from '@jagreehal/workflow/visualize';
+import { createVisualizer } from '@jagreehal/workflow/visualize';
 
-const builder = createIRBuilder();
+const viz = createVisualizer({ workflowName: 'User posts flow' });
 const workflow = createWorkflow({ fetchUser, fetchPosts }, {
-  onEvent: (event) => builder.addEvent(event),
+  onEvent: viz.handleEvent,
 });
 
 await workflow(async (step, deps) => {
@@ -774,8 +867,8 @@ await workflow(async (step, deps) => {
   return { user, posts };
 });
 
-console.log(renderToAscii(builder.getIR()));
-console.log(renderToMermaid(builder.getIR()));
+console.log(viz.render());        // ASCII for terminal
+console.log(viz.renderAs('mermaid')); // Mermaid for docs
 ```
 
 ---

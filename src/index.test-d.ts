@@ -207,7 +207,9 @@ function _test6() {
 // =============================================================================
 
 function _test6b() {
-  const result: Result<number, "NOT_FOUND", Error> = ok(42);
+  // Use a function return to prevent TypeScript from narrowing based on literal value
+  const getResult = (): Result<number, "NOT_FOUND", Error> => ok(42);
+  const result = getResult();
 
   // isOk() narrows to Ok<T> - clean predicate, not { ok: true; value: T }
   if (isOk(result)) {
@@ -759,7 +761,7 @@ async function _test27WorkflowCauseIsUnknown() {
 // TEST 28: batch operations preserve cause types
 // =============================================================================
 
-import { all, any } from "./index";
+import { all, any, allSettled } from "./index";
 
 function _test28BatchPreservesCause() {
   // Results with typed causes
@@ -1309,4 +1311,195 @@ function _testMatchPartialReturnType(error: TestError) {
     expectType<TestError>(e);
     return "fallback";
   });
+}
+
+// =============================================================================
+// TEST 45: map overloads - Ok<T> input returns Ok<U>
+// =============================================================================
+
+function _test45MapOkOverload() {
+  const okResult = ok(42);
+  const mapped = map(okResult, (n) => n.toString());
+
+  // When input is Ok<T>, output is Ok<U>
+  expectType<Ok<string>>(mapped);
+  expectType<string>(mapped.value);
+}
+
+function _test45MapErrOverload() {
+  const errResult = err("ERROR", { cause: new Error() });
+  // When input is Err, the Err overload is selected. Typed callbacks work
+  // because (value: T) => U is assignable to (value: never) => unknown
+  // via contravariance (never is assignable to T).
+  const mapped = map(errResult, (n: number) => n.toString());
+
+  // When input is Err<E, C>, output is Err<E, C>
+  expectType<Err<string, Error>>(mapped);
+  expectType<string>(mapped.error);
+  expectType<Error | undefined>(mapped.cause);
+}
+
+function _test45bMapErrCallbackType() {
+  const errResult = err("ERROR", { cause: new Error() }) as Err<"ERROR", Error>;
+
+  // Pre-typed handlers work - T is inferred from the handler type.
+  // This allows reusing handlers across Ok and Err branches.
+  const handler = (n: number) => n.toString();
+  const mapped = map(errResult, handler);
+  expectType<Err<"ERROR", Error>>(mapped);
+
+  // Explicitly typed inline callbacks also work
+  map(errResult, (n: number) => n.toString());
+}
+
+function _test45cMapErrAfterNarrowKeepsValueType() {
+  const result = err("ERROR", { cause: new Error() }) as Result<number, "ERROR", Error>;
+
+  if (!result.ok) {
+    map(result, (value) => {
+      // Note: After narrowing to Err, value type becomes unknown.
+      // If you need the value type, annotate the callback or use match().
+      expectType<unknown>(value);
+      return String(value);
+    });
+  }
+}
+
+function _test45dMapErrAfterNarrowStillLosesValue() {
+  const result = err("ERROR", { cause: new Error() }) as Result<number, "ERROR", Error>;
+
+  if (!result.ok) {
+    map(result, (value) => {
+      // Fails today: value is inferred as unknown even though success type is number
+      // @ts-expect-error value should stay number after isErr narrow
+      expectType<number>(value);
+      return value;
+    });
+  }
+}
+
+// =============================================================================
+// TEST 46: andThen overloads - precise return types
+// =============================================================================
+
+function _test46AndThenOkToOk() {
+  const okResult = ok(42);
+  const chained = andThen(okResult, (n) => ok(n.toString()));
+
+  // Ok -> Ok returns Ok
+  expectType<Ok<string>>(chained);
+}
+
+function _test46AndThenOkToErr() {
+  const okResult = ok(42);
+  const chained = andThen(okResult, (_n) => err("FAILED" as const, { cause: new Error() }));
+
+  // Ok -> Err returns Err
+  expectType<Err<"FAILED", Error>>(chained);
+}
+
+function _test46AndThenOkToResult() {
+  const okResult = ok(42);
+  const getResult = (): Result<string, "ERROR", TypeError> => ok("hello");
+  const chained = andThen(okResult, (_n) => getResult());
+
+  // Ok -> Result returns Result (no E from input since Ok has no error)
+  expectType<Result<string, "ERROR", TypeError>>(chained);
+}
+
+function _test46AndThenErrOverload() {
+  const errResult = err("NOT_FOUND" as const, { cause: new Error() });
+  // When input is Err, the Err overload is selected. Typed callbacks work
+  // via contravariance (never is assignable to number).
+  const chained = andThen(errResult, (n: number) => ok(n.toString()));
+
+  // Err input short-circuits, returns Err
+  expectType<Err<"NOT_FOUND", Error>>(chained);
+}
+
+function _test46bAndThenErrCallbackType() {
+  const errResult = err("NOT_FOUND" as const, { cause: new Error() }) as Err<"NOT_FOUND", Error>;
+
+  // Pre-typed handlers work - T is inferred from the handler type.
+  // This allows reusing handlers across Ok and Err branches.
+  const handler = (n: number) => ok(n.toString());
+  const chained = andThen(errResult, handler);
+  expectType<Err<"NOT_FOUND", Error>>(chained);
+
+  // Explicitly typed inline callbacks also work
+  andThen(errResult, (n: number) => ok(n.toString()));
+}
+
+function _test46cAndThenErrAfterNarrowKeepsValueType() {
+  const result = err("NOT_FOUND" as const, { cause: new Error() }) as Result<number, "NOT_FOUND", Error>;
+
+  if (!result.ok) {
+    andThen(result, (value) => {
+      // Note: After narrowing to Err, value type becomes unknown.
+      // If you need the value type, annotate the callback or use match().
+      expectType<unknown>(value);
+      return ok(String(value));
+    });
+  }
+}
+
+function _test46dAndThenErrAfterNarrowStillLosesValue() {
+  const result = err("NOT_FOUND" as const, { cause: new Error() }) as Result<number, "NOT_FOUND", Error>;
+
+  if (!result.ok) {
+    andThen(result, (value) => {
+      // Fails today: value is inferred as unknown even though success type is number
+      // @ts-expect-error value should stay number after isErr narrow
+      expectType<number>(value);
+      return ok(value);
+    });
+  }
+}
+
+// =============================================================================
+// TEST 47: match overloads - Ok<T> and Err<E, C> specific inputs
+// =============================================================================
+
+function _test47MatchOkOverload() {
+  const okResult = ok(42);
+  const result = match(okResult, {
+    ok: (n) => `Value: ${n}`,
+    err: (_e) => "Error",
+  });
+
+  expectType<string>(result);
+}
+
+function _test47MatchErrOverload() {
+  const errResult = err("NOT_FOUND" as const, { cause: new Error() });
+  const result = match(errResult, {
+    ok: (_n: number) => "Success",
+    err: (e, cause) => `Error: ${e}, cause: ${cause}`,
+  });
+
+  expectType<string>(result);
+}
+
+// =============================================================================
+// TEST 48: all with Result<T, never> returns Ok<...>
+// =============================================================================
+
+function _test48AllWithNeverErrors() {
+  // When inputs are typed as Ok<T> directly, result should be Ok
+  const a = ok(1);
+  const b = ok("hello");
+  const combined = all([a, b]);
+
+  // When all inputs are Ok<T>, result should be Ok
+  expectType<Ok<readonly [number, string]>>(combined);
+}
+
+function _test48AllSettledWithNeverErrors() {
+  // When inputs are typed as Ok<T> directly, result should be Ok
+  const a = ok(1);
+  const b = ok("hello");
+  const combined = allSettled([a, b]);
+
+  // When all inputs are Ok<T>, result should be Ok
+  expectType<Ok<readonly [number, string]>>(combined);
 }

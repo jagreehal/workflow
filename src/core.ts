@@ -34,6 +34,8 @@ export type Ok<T> = { ok: true; value: T };
  * Use `err(error)` to create instances.
  *
  * @template E - The type of the error value
+ * @template C - The type of the cause (defaults to unknown)
+ * @template T - Phantom type for the success value (preserved after narrowing)
  *
  * @example
  * ```typescript
@@ -52,9 +54,7 @@ export type Err<E, C = unknown> = { ok: false; error: E; cause?: C };
  * @template E - The type of the error value (defaults to unknown)
  * @template C - The type of the cause (defaults to unknown)
  */
-export type Result<T, E = unknown, C = unknown> =
-  | { ok: true; value: T }
-  | { ok: false; error: E; cause?: C };
+export type Result<T, E = unknown, C = unknown> = Ok<T> | Err<E, C>;
 
 /**
  * A Promise that resolves to a Result.
@@ -2603,7 +2603,7 @@ export const unwrapOrElse = <T, E, C>(
  * // error: { ok: false, error: SyntaxError }
  * ```
  */
-export function from<T>(fn: () => T): Result<T, unknown>;
+export function from<T>(fn: () => T): Ok<T> | Err<unknown, unknown>;
 /**
  * Wraps a synchronous throwing function in a Result with custom error mapping.
  *
@@ -2629,7 +2629,7 @@ export function from<T>(fn: () => T): Result<T, unknown>;
  * );
  * ```
  */
-export function from<T, E>(fn: () => T, onError: (cause: unknown) => E): Result<T, E>;
+export function from<T, E>(fn: () => T, onError: (cause: unknown) => E): Ok<T> | Err<E, unknown>;
 export function from<T, E>(fn: () => T, onError?: (cause: unknown) => E) {
   try {
     return ok(fn());
@@ -2668,7 +2668,7 @@ export function from<T, E>(fn: () => T, onError?: (cause: unknown) => E) {
  * // result.ok: true if fetch succeeded, false if rejected
  * ```
  */
-export function fromPromise<T>(promise: Promise<T>): AsyncResult<T, unknown>;
+export function fromPromise<T>(promise: Promise<T>): Promise<Ok<T> | Err<unknown, unknown>>;
 /**
  * Wraps a Promise in a Result with custom error mapping.
  *
@@ -2700,11 +2700,11 @@ export function fromPromise<T>(promise: Promise<T>): AsyncResult<T, unknown>;
 export function fromPromise<T, E>(
   promise: Promise<T>,
   onError: (cause: unknown) => E
-): AsyncResult<T, E>;
+): Promise<Ok<T> | Err<E, unknown>>;
 export async function fromPromise<T, E>(
   promise: Promise<T>,
   onError?: (cause: unknown) => E
-): AsyncResult<T, E | unknown> {
+): Promise<Ok<T> | Err<E, unknown> | Err<unknown, unknown>> {
   try {
     return ok(await promise);
   } catch (cause) {
@@ -2873,10 +2873,11 @@ export function fromNullable<T, E>(
  * );
  * ```
  */
-export function map<T, U, E, C>(
-  r: Result<T, E, C>,
-  fn: (value: T) => U
-): Result<U, E, C> {
+export function map<T, U>(r: Ok<T>, fn: (value: T) => U): Ok<U>;
+export function map<T, U, E, C>(r: Err<E, C>, fn: (value: T) => U): Err<E, C>;
+export function map<T, U, E, C>(r: Result<T, E, C>, fn: (value: T) => U): Result<U, E, C>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function map(r: any, fn: any): any {
   return r.ok ? ok(fn(r.value)) : r;
 }
 
@@ -2973,10 +2974,11 @@ export function mapError<T, E, F, C>(
  * });
  * ```
  */
-export function match<T, E, C, R>(
-  r: Result<T, E, C>,
-  handlers: { ok: (value: T) => R; err: (error: E, cause?: C) => R }
-): R {
+export function match<T, E, C, R>(r: Ok<T>, handlers: { ok: (value: T) => R; err: (error: E, cause?: C) => R }): R;
+export function match<T, E, C, R>(r: Err<E, C>, handlers: { ok: (value: T) => R; err: (error: E, cause?: C) => R }): R;
+export function match<T, E, C, R>(r: Result<T, E, C>, handlers: { ok: (value: T) => R; err: (error: E, cause?: C) => R }): R;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function match(r: any, handlers: any): any {
   return r.ok ? handlers.ok(r.value) : handlers.err(r.error, r.cause);
 }
 
@@ -3036,10 +3038,13 @@ export function match<T, E, C, R>(
  * // data.error: 'FETCH_ERROR' | 'NOT_FOUND'
  * ```
  */
-export function andThen<T, U, E, F, C1, C2>(
-  r: Result<T, E, C1>,
-  fn: (value: T) => Result<U, F, C2>
-): Result<U, E | F, C1 | C2> {
+export function andThen<T, U>(r: Ok<T>, fn: (value: T) => Ok<U>): Ok<U>;
+export function andThen<T, F, C2>(r: Ok<T>, fn: (value: T) => Err<F, C2>): Err<F, C2>;
+export function andThen<T, U, F, C2>(r: Ok<T>, fn: (value: T) => Result<U, F, C2>): Result<U, F, C2>;
+export function andThen<T, U, E, F, C1, C2>(r: Err<E, C1>, fn: (value: T) => Result<U, F, C2>): Err<E, C1>;
+export function andThen<T, U, E, F, C1, C2>(r: Result<T, E, C1>, fn: (value: T) => Result<U, F, C2>): Result<U, E | F, C1 | C2>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function andThen(r: any, fn: any): any {
   return r.ok ? fn(r.value) : r;
 }
 
@@ -3550,14 +3555,39 @@ export function isSerializedResult(
 // =============================================================================
 
 type AllValues<T extends readonly Result<unknown, unknown, unknown>[]> = {
-  [K in keyof T]: T[K] extends Result<infer V, unknown, unknown> ? V : never;
+  [K in keyof T]: T[K] extends Ok<infer V>
+    ? V
+    : T[K] extends Err<unknown, unknown>
+      ? never
+      : T[K] extends Result<infer V, unknown, unknown>
+        ? V
+        : never;
 };
 type AllErrors<T extends readonly Result<unknown, unknown, unknown>[]> = {
-  [K in keyof T]: T[K] extends Result<unknown, infer E, unknown> ? E : never;
+  [K in keyof T]: T[K] extends Ok<unknown>
+    ? never
+    : T[K] extends Err<infer E, unknown>
+      ? E
+      : T[K] extends Result<unknown, infer E, unknown>
+        ? E
+        : never;
 }[number];
 type AllCauses<T extends readonly Result<unknown, unknown, unknown>[]> = {
-  [K in keyof T]: T[K] extends Result<unknown, unknown, infer C> ? C : never;
+  [K in keyof T]: T[K] extends Ok<unknown>
+    ? never
+    : T[K] extends Err<unknown, infer C>
+      ? C
+      : T[K] extends Result<unknown, unknown, infer C>
+        ? C
+        : never;
 }[number];
+
+// Conditional type: returns Ok<...> when there are no errors, Result<...> otherwise
+// Note: We only check AllErrors, not AllCauses - causes only matter when there are errors
+type AllResult<T extends readonly Result<unknown, unknown, unknown>[]> =
+  [AllErrors<T>] extends [never]
+    ? Ok<AllValues<T>>
+    : Result<AllValues<T>, AllErrors<T>, AllCauses<T>>;
 
 /**
  * Combines multiple Results into one, requiring all to succeed.
@@ -3608,15 +3638,15 @@ type AllCauses<T extends readonly Result<unknown, unknown, unknown>[]> = {
  */
 export function all<const T extends readonly Result<unknown, unknown, unknown>[]>(
   results: T
-): Result<AllValues<T>, AllErrors<T>, AllCauses<T>> {
+): AllResult<T> {
   const values: unknown[] = [];
   for (const result of results) {
     if (!result.ok) {
-      return result as unknown as Result<AllValues<T>, AllErrors<T>, AllCauses<T>>;
+      return result as unknown as AllResult<T>;
     }
     values.push(result.value);
   }
-  return ok(values) as Result<AllValues<T>, AllErrors<T>, AllCauses<T>>;
+  return ok(values) as AllResult<T>;
 }
 
 /**
@@ -3716,10 +3746,11 @@ export async function allAsync<
 
 export type SettledError<E, C = unknown> = { error: E; cause?: C };
 
-type AllSettledResult<T extends readonly Result<unknown, unknown, unknown>[]> = Result<
-  AllValues<T>,
-  SettledError<AllErrors<T>, AllCauses<T>>[]
->;
+// Conditional type: returns Ok<...> when there are no errors, Result<...> otherwise
+type AllSettledResult<T extends readonly Result<unknown, unknown, unknown>[]> =
+  [AllErrors<T>] extends [never]
+    ? Ok<AllValues<T>>
+    : Result<AllValues<T>, SettledError<AllErrors<T>, AllCauses<T>>[]>;
 
 /**
  * Combines multiple Results, collecting all errors instead of short-circuiting.

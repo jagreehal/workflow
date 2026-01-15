@@ -191,7 +191,7 @@ const workflow2 = createWorkflow(
   { fetchData, requireManagerApproval },
   { resumeState }
 );
-// Re-run same workflow body — cached steps skip, approval injected
+// Re-run same workflow body -- cached steps skip, approval injected
 ```
 
 ### HITL utilities

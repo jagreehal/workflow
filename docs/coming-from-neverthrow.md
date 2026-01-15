@@ -2,26 +2,26 @@
 
 You already get it: **errors should be in the type system, not hidden behind `unknown`**. Both neverthrow and this library share that philosophy.
 
-The difference? neverthrow gives you typed Results. This library gives you typed Results *plus* orchestration—retries, timeouts, caching, resume, and visualization built in.
+The difference? neverthrow gives you typed Results. This library gives you typed Results *plus* orchestration--retries, timeouts, caching, resume, and visualization built in.
 
-This library **automatically infers error types** from your dependencies. No more manually tracking error unions—add a step, the union updates. Remove one? It updates. TypeScript enforces it at compile time.
+This library **automatically infers error types** from your dependencies. No more manually tracking error unions--add a step, the union updates. Remove one? It updates. TypeScript enforces it at compile time.
 
 **TL;DR:**
 - `andThen` chains → `step()` calls with async/await
-- **Automatic error inference** — no manual union tracking
+- **Automatic error inference** -- no manual union tracking
 - Same error-first mindset, different syntax
-- Keep your existing neverthrow code—they interop cleanly
+- Keep your existing neverthrow code--they interop cleanly
 
 ## Two philosophies, same goal
 
 | | neverthrow | @jagreehal/workflow |
 |---|------------|---------------------|
-| **Mental model** | "The Realist" — explicit about what can fail | "The Orchestrator" — explicit failures + execution control |
+| **Mental model** | "The Realist" -- explicit about what can fail | "The Orchestrator" -- explicit failures + execution control |
 | **Syntax** | Functional chaining (`.andThen()`, `.map()`) | Imperative async/await with `step()` |
-| **Error inference** | ⚠️ **Manual union types** — you maintain them | ✅ **Automatic from dependencies** — always in sync |
+| **Error inference** | ⚠️ **Manual union types** -- you maintain them | ✅ **Automatic from dependencies** -- always in sync |
 | **Orchestration** | DIY (retries, caching, timeouts) | Built-in primitives |
 
-Both make your functions *honest*—the signature says what can go wrong. The key difference: **workflow eliminates the manual union tracking burden** while adding orchestration features.
+Both make your functions *honest*--the signature says what can go wrong. The key difference: **workflow eliminates the manual union tracking burden** while adding orchestration features.
 
 ---
 
@@ -73,7 +73,7 @@ By default, workflow results include `UnexpectedError` alongside your typed erro
 // result.error: 'NOT_FOUND' | 'FETCH_ERROR' | UnexpectedError
 ```
 
-`UnexpectedError` wraps uncaught exceptions so they don't crash your app—it contains the thrown value in `cause` for debugging. If you want a **closed** error union (no `UnexpectedError`), use strict mode:
+`UnexpectedError` wraps uncaught exceptions so they don't crash your app--it contains the thrown value in `cause` for debugging. If you want a **closed** error union (no `UnexpectedError`), use strict mode:
 
 ```typescript
 const workflow = createWorkflow(
@@ -104,7 +104,7 @@ async function loadDashboard(userId: string) {
 }
 ```
 
-TypeScript sees this as returning `{ user, org }` or throwing `unknown`. All the real errors—NOT_FOUND, PERMISSION_DENIED, TIMEOUT—are erased.
+TypeScript sees this as returning `{ user, org }` or throwing `unknown`. All the real errors--NOT_FOUND, PERMISSION_DENIED, TIMEOUT--are erased.
 
 Both neverthrow and workflow fix this by making errors part of the return type.
 
@@ -235,7 +235,7 @@ const result = await loadDashboard(async (step, deps) => {
 });
 ```
 
-The `step()` function unwraps `Ok` values and short-circuits on `Err`—same semantics as `andThen`, but stays flat regardless of depth.
+The `step()` function unwraps `Ok` values and short-circuits on `Err`--same semantics as `andThen`, but stays flat regardless of depth.
 
 ---
 
@@ -260,7 +260,7 @@ const result = await run(async (step) => {
 });
 ```
 
-If any step returns `Err`, execution stops immediately—no manual `if (result.isErr())` checks needed.
+If any step returns `Err`, execution stops immediately--no manual `if (result.isErr())` checks needed.
 
 ---
 
@@ -296,7 +296,7 @@ fetchUser(id).orElse(error => {
 });
 ```
 
-**workflow** — now with direct `orElse()` function:
+**workflow** -- now with direct `orElse()` function:
 
 ```typescript
 import { orElse, ok, err } from '@jagreehal/workflow';
@@ -488,7 +488,7 @@ const enrichedResult = mapError(userResult, error => ({
 
 ### Automatic error type inference
 
-> Error unions are computed automatically—no manual tracking, no drift, no bugs.
+> Error unions are computed automatically--no manual tracking, no drift, no bugs.
 
 **neverthrow** requires you to declare error unions explicitly:
 
@@ -565,7 +565,7 @@ Beyond syntax preference, there are two structural advantages to workflow's impe
 
 ### Variable scoping (no closure drilling)
 
-**neverthrow** — accessing variables from earlier steps means nesting or explicit passing:
+**neverthrow** -- accessing variables from earlier steps means nesting or explicit passing:
 
 ```typescript
 fetchUser(id)
@@ -579,7 +579,7 @@ fetchUser(id)
   );
 ```
 
-**workflow** — all variables are in block scope:
+**workflow** -- all variables are in block scope:
 
 ```typescript
 const result = await workflow(async (step) => {
@@ -587,7 +587,7 @@ const result = await workflow(async (step) => {
   const posts = await step(fetchPosts(user.id));
   const comments = await step(fetchComments(posts[0].id));
 
-  // All variables accessible—no drilling needed
+  // All variables accessible--no drilling needed
   return calculateAnalytics(user, posts, comments);
 });
 ```
@@ -596,7 +596,7 @@ This matters most in checkout flows, data pipelines, and any multi-step process 
 
 ### Native control flow (branching without gymnastics)
 
-**neverthrow** — conditional logic requires functional patterns:
+**neverthrow** -- conditional logic requires functional patterns:
 
 ```typescript
 fetchTenant(id).andThen(tenant => {
@@ -611,7 +611,7 @@ fetchTenant(id).andThen(tenant => {
 
 All branches must return the same Result type, and you lose access to `tenant` inside deeper callbacks without passing it.
 
-**workflow** — just JavaScript:
+**workflow** -- just JavaScript:
 
 ```typescript
 const result = await workflow(async (step) => {
@@ -639,13 +639,13 @@ const result = await workflow(async (step) => {
 });
 ```
 
-Standard `if`, `switch`, `for`, `while`—no learning curve for conditional logic.
+Standard `if`, `switch`, `for`, `while`--no learning curve for conditional logic.
 
 ---
 
 ## What you get on top of neverthrow
 
-Everything above is pattern translation—same capabilities, different syntax. These features are *new*—they don't have neverthrow equivalents because they're about orchestration, not just error handling.
+Everything above is pattern translation--same capabilities, different syntax. These features are *new*--they don't have neverthrow equivalents because they're about orchestration, not just error handling.
 
 ### Retry with backoff
 

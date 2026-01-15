@@ -1,6 +1,6 @@
 # Resource Management
 
-RAII-style (Resource Acquisition Is Initialization) resource cleanup for async operations. Connections, file handles, and locks get cleaned up automatically—even when errors occur.
+RAII-style (Resource Acquisition Is Initialization) resource cleanup for async operations. Connections, file handles, and locks get cleaned up automatically--even when errors occur.
 
 ## Table of Contents
 
@@ -59,7 +59,7 @@ async function processData(userId: string) {
 
 ## The Solution: `withScope`
 
-Register resources with a scope. They're cleaned up automatically when the scope exits—success, error, or exception:
+Register resources with a scope. They're cleaned up automatically when the scope exits--success, error, or exception:
 
 ```typescript
 import { withScope, ok, err } from '@jagreehal/workflow';
@@ -112,7 +112,7 @@ async function getUsers(): AsyncResult<User[], 'DB_ERROR'> {
 
 ## LIFO Cleanup Order
 
-Resources are cleaned up in **reverse order** (LIFO: Last-In-First-Out). This handles dependencies correctly—later resources often depend on earlier ones:
+Resources are cleaned up in **reverse order** (LIFO: Last-In-First-Out). This handles dependencies correctly--later resources often depend on earlier ones:
 
 ```typescript
 const result = await withScope(async (scope) => {
@@ -494,7 +494,7 @@ Why this works: The distributed lock is always released, even if processing fail
 
 - **Single resource** - A simple `try/finally` is clearer for one resource
 - **Non-async cleanup** - If cleanup is synchronous, RAII patterns are simpler
-- **Global resources** - Connection pools, singletons—these have their own lifecycle
+- **Global resources** - Connection pools, singletons--these have their own lifecycle
 - **Framework-managed** - If your framework handles cleanup (e.g., request-scoped DI), use that
 
 ## Summary

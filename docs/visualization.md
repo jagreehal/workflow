@@ -1,6 +1,6 @@
 # Workflow Visualization
 
-Tools for seeing what your workflows actually do—ASCII timelines, Mermaid diagrams, live terminal updates, and performance analysis.
+Tools for seeing what your workflows actually do--ASCII timelines, Mermaid diagrams, live terminal updates, and performance analysis.
 
 ## The Problem: Invisible Execution
 
@@ -16,7 +16,7 @@ const result = await workflow(async (step) => {
   });
   // ... more steps
 });
-// result.ok === false — but which step failed and when?
+// result.ok === false -- but which step failed and when?
 ```
 
 Without visibility, debugging means adding `console.log` everywhere. That's noise.
@@ -286,7 +286,7 @@ await workflow(async (step) => {
 live.stop();  // Stop updates, show final state
 ```
 
-The terminal updates as each step completes—useful for long-running workflows.
+The terminal updates as each step completes--useful for long-running workflows.
 
 ## Performance Analysis
 

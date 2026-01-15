@@ -32,7 +32,7 @@ type WorkflowError =
   | ...;
 ```
 
-Notice how even reliability mechanisms (retry exhaustion, circuit breakers) add variants if modeled as distinct errors—another reason to collapse. Policy errors are still "infrastructure noise" at the workflow layer unless business logic needs to distinguish them.
+Notice how even reliability mechanisms (retry exhaustion, circuit breakers) add variants if modeled as distinct errors--another reason to collapse. Policy errors are still "infrastructure noise" at the workflow layer unless business logic needs to distinguish them.
 
 This union:
 
@@ -303,7 +303,7 @@ const result = await transferMoney(
 
 ### End-to-End: API Handler
 
-Here's the complete picture—workflow result to HTTP response with structured logging:
+Here's the complete picture--workflow result to HTTP response with structured logging:
 
 ```typescript
 // API route handler

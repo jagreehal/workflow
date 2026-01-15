@@ -358,8 +358,11 @@ function generateHTML(
     <header class="wv-header">
       <h1>${escapeXml(workflowName)}</h1>
       <div class="wv-controls">
+        ${options.interactive ? `
+          <button id="load-json-btn" class="wv-btn" title="Load workflow state from JSON">Load JSON</button>
+        ` : ""}
         ${options.wsUrl ? `<div id="live-indicator" class="wv-live" style="display:none"><span class="wv-live-dot"></span>LIVE</div>` : ""}
-        ${options.heatmap ? `
+        ${options.heatmap && options.wsUrl ? `
           <button id="heatmap-toggle" class="wv-btn">Heatmap</button>
           <select id="heatmap-metric" class="wv-btn">
             <option value="duration">Duration</option>
@@ -420,61 +423,76 @@ function generateHTML(
     ` : ""}
   </div>
 
+  ${options.interactive ? `
+    <div id="load-json-modal" class="wv-modal" style="display:none">
+      <div class="wv-modal-content">
+        <div class="wv-modal-header">
+          <h2>Load Workflow State</h2>
+          <button id="load-json-close" class="wv-btn wv-btn--icon" title="Close">×</button>
+        </div>
+        <div class="wv-modal-body">
+          <p>Paste the workflow IR JSON (from <code>viz.getIR()</code> or <code>viz.renderAs('json')</code>):</p>
+          <textarea id="load-json-input" class="wv-textarea" rows="15" placeholder='{"root":{"type":"workflow","id":"...","children":[...]}}'></textarea>
+          <div id="load-json-error" class="wv-error" style="display:none"></div>
+        </div>
+        <div class="wv-modal-footer">
+          <button id="load-json-submit" class="wv-btn wv-btn--primary">Load</button>
+          <button id="load-json-cancel" class="wv-btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+  ` : ""}
+
   <script>
-    window.__WORKFLOW_DATA__ = ${serializeWorkflowData(ir)};
+    // Check if we have a saved IR in sessionStorage (from Load JSON)
+    (function() {
+      let initialIR = ${JSON.stringify(ir).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029")};
+      try {
+        const savedIR = sessionStorage.getItem('workflow_ir');
+        if (savedIR) {
+          initialIR = JSON.parse(savedIR);
+          sessionStorage.removeItem('workflow_ir'); // Clear after use
+        }
+      } catch (e) {
+        console.warn('Failed to load saved IR:', e);
+      }
+      
+      window.__WORKFLOW_IR__ = initialIR;
+      
+      // Build workflow data from IR
+      function buildWorkflowDataFromIR(ir) {
+        const nodes = {};
+        function collectNodes(flowNodes) {
+          for (const node of flowNodes || []) {
+            nodes[node.id] = {
+              id: node.id,
+              name: node.name,
+              type: node.type,
+              state: node.state,
+              key: node.key,
+              durationMs: node.durationMs,
+              startTs: node.startTs,
+              error: node.error ? String(node.error) : undefined,
+              retryCount: node.retryCount,
+            };
+            if (node.children) collectNodes(node.children);
+            if (node.branches) {
+              for (const branch of node.branches) {
+                collectNodes(branch.children);
+              }
+            }
+          }
+        }
+        collectNodes(ir.root.children);
+        return { nodes };
+      }
+      
+      window.__WORKFLOW_DATA__ = buildWorkflowDataFromIR(initialIR);
+    })();
   </script>
   <script>${js}</script>
 </body>
 </html>`;
-}
-
-/**
- * Build workflow data structure for client-side access.
- */
-function buildWorkflowData(ir: WorkflowIR): { nodes: Record<string, unknown> } {
-  const nodes: Record<string, unknown> = {};
-
-  function collectNodes(flowNodes: FlowNode[]): void {
-    for (const node of flowNodes) {
-      nodes[node.id] = {
-        id: node.id,
-        name: node.name,
-        type: node.type,
-        state: node.state,
-        key: node.key,
-        durationMs: node.durationMs,
-        startTs: node.startTs,
-        error: node.error ? String(node.error) : undefined,
-        retryCount: node.retryCount,
-      };
-
-      if ("children" in node && Array.isArray(node.children)) {
-        collectNodes(node.children);
-      }
-      if ("branches" in node) {
-        for (const branch of node.branches) {
-          collectNodes(branch.children);
-        }
-      }
-    }
-  }
-
-  collectNodes(ir.root.children);
-  return { nodes };
-}
-
-/**
- * Serialize workflow data for safe embedding inside a <script> tag.
- */
-function serializeWorkflowData(ir: WorkflowIR): string {
-  const json = JSON.stringify(buildWorkflowData(ir));
-  // Escape characters that could break out of the script context
-  return json
-    .replace(/</g, "\\u003c")
-    .replace(/>/g, "\\u003e")
-    .replace(/&/g, "\\u0026")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
 }
 
 // =============================================================================

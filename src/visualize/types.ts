@@ -351,7 +351,7 @@ export interface Renderer {
 /**
  * Output format for rendering.
  */
-export type OutputFormat = "ascii" | "mermaid" | "json" | "logger";
+export type OutputFormat = "ascii" | "mermaid" | "json" | "logger" | "flowchart";
 
 /**
  * Options for creating a visualizer.
@@ -622,6 +622,19 @@ export interface EnhancedRenderOptions extends RenderOptions {
   showSparklines?: boolean;
   /** Historical timing data for sparklines: nodeId → array of durations */
   timingHistory?: Map<string, number[]>;
+}
+
+/**
+ * Options for the flowchart ASCII renderer.
+ * Renders workflow as a proper flowchart with boxes and arrows.
+ */
+export interface FlowchartRenderOptions extends EnhancedRenderOptions {
+  /** Show start and end nodes (default: true) */
+  showStartEnd?: boolean;
+  /** Reduce vertical spacing between nodes (default: false) */
+  compact?: boolean;
+  /** Box border style (default: 'single') */
+  boxStyle?: "single" | "double" | "rounded";
 }
 
 // =============================================================================

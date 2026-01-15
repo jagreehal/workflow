@@ -187,6 +187,8 @@ body {
 .wv-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  background-color: var(--bg-secondary);
+  color: var(--text-muted);
 }
 
 .wv-btn--primary {
@@ -230,11 +232,11 @@ body {
 /* SVG Node styles */
 .wv-node {
   cursor: pointer;
-  transition: transform 0.15s ease;
+  transition: filter 0.15s ease;
 }
 
 .wv-node:hover {
-  transform: scale(1.02);
+  filter: brightness(1.1) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
 }
 
 .wv-node rect,
@@ -242,6 +244,11 @@ body {
   stroke: var(--border);
   stroke-width: 2;
   transition: all 0.2s ease;
+}
+
+.wv-node:hover rect,
+.wv-node:hover circle {
+  stroke-width: 3;
 }
 
 .wv-node--pending rect { fill: var(--node-pending); }
@@ -563,6 +570,100 @@ body {
   opacity: 0.5;
 }
 
+/* Modal */
+.wv-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.wv-modal-content {
+  background-color: var(--bg);
+  border-radius: 8px;
+  width: 90%;
+  max-width: 600px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+.wv-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.wv-modal-header h2 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.wv-modal-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.wv-modal-body p {
+  margin: 0 0 12px 0;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.wv-modal-body code {
+  background-color: var(--bg-secondary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-family: monospace;
+}
+
+.wv-textarea {
+  width: 100%;
+  padding: 12px;
+  font-family: monospace;
+  font-size: 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background-color: var(--bg);
+  color: var(--text);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.wv-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.wv-error {
+  margin-top: 12px;
+  padding: 12px;
+  background-color: var(--node-error);
+  color: #842029;
+  border-radius: 6px;
+  font-size: 0.875rem;
+}
+
+.wv-modal-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .wv-inspector {
@@ -576,6 +677,11 @@ body {
 
   .wv-timeline {
     height: auto;
+  }
+
+  .wv-modal-content {
+    width: 95%;
+    max-height: 95vh;
   }
 }
 `;

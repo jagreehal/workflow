@@ -31,6 +31,10 @@ import {
   recover,
   recoverAsync,
   pendingApproval,
+  Match,
+  Schedule,
+  Duration,
+  type DurationType,
 } from "./index";
 
 // =============================================================================
@@ -1502,4 +1506,81 @@ function _test48AllSettledWithNeverErrors() {
 
   // When all inputs are Ok<T>, result should be Ok
   expectType<Ok<readonly [number, string]>>(combined);
+}
+
+// =============================================================================
+// TEST 49: Match.is and Match.isOneOf type guards
+// =============================================================================
+
+type TestEvent =
+  | { _tag: "UserCreated"; userId: string; name: string }
+  | { _tag: "UserUpdated"; userId: string }
+  | { _tag: "UserDeleted"; userId: string };
+
+function _test49MatchTypeGuards() {
+  const event: TestEvent = { _tag: "UserCreated", userId: "1", name: "Alice" };
+
+  // Match.is should narrow the type
+  if (Match.is<TestEvent, "UserCreated">("UserCreated")(event)) {
+    expectType<string>(event.name);
+    expectType<string>(event.userId);
+  }
+
+  // Match.isOneOf should narrow to union of matched types
+  const isModification = Match.isOneOf<TestEvent, ("UserCreated" | "UserUpdated")[]>(
+    "UserCreated",
+    "UserUpdated"
+  );
+
+  if (isModification(event)) {
+    // event should be UserCreated | UserUpdated
+    expectType<string>(event.userId);
+  }
+}
+
+// =============================================================================
+// TEST 50: Schedule.spaced().pipe() chain works
+// =============================================================================
+
+function _test50SchedulePipeChain() {
+  // Schedule.spaced returns PipedSchedule with working pipe method
+  const schedule = Schedule.spaced(Duration.millis(100))
+    .pipe(Schedule.upTo(5))
+    .pipe(Schedule.jittered(0.2))
+    .pipe(Schedule.maxDelay(Duration.seconds(30)));
+
+  // The schedule should still be usable
+  const runner = Schedule.run(schedule);
+  const step = runner.next(undefined);
+
+  if (!step.done) {
+    // Output should be number (from spaced)
+    expectType<number>(step.value.output);
+  }
+}
+
+function _test50ScheduleExponentialPipeChain() {
+  const schedule = Schedule.exponential(Duration.millis(100))
+    .pipe(Schedule.upTo(3))
+    .pipe(Schedule.andThen(Schedule.spaced(Duration.seconds(1))));
+
+  const runner = Schedule.run(schedule);
+  const step = runner.next(undefined);
+
+  if (!step.done) {
+    // Duration type should be preserved
+    expectType<DurationType>(step.value.delay);
+  }
+}
+
+// =============================================================================
+// TEST 51: Schedule.delays helper returns correct type
+// =============================================================================
+
+function _test51ScheduleDelays() {
+  const schedule = Schedule.fibonacci(Duration.millis(100)).pipe(Schedule.upTo(5));
+  const delays = Schedule.delays(schedule);
+
+  // delays should be array of Duration
+  expectType<DurationType[]>(delays);
 }

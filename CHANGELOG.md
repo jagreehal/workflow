@@ -1,5 +1,11 @@
 # @jagreehal/workflow
 
+## 1.14.0
+
+### Minor Changes
+
+- fc2f654: Enhanced Mermaid visualization with retry loops, error paths, and timeout edges as visual elements. Added documentation for Pino logging integration with workflow events.
+
 ## 1.13.0
 
 ### Minor Changes

@@ -36,6 +36,21 @@
       "types": "./dist/resource.d.ts",
       "import": "./dist/resource.js",
       "require": "./dist/resource.cjs"
+    },
+    "./duration": {
+      "types": "./dist/duration.d.ts",
+      "import": "./dist/duration.js",
+      "require": "./dist/duration.cjs"
+    },
+    "./match": {
+      "types": "./dist/match.d.ts",
+      "import": "./dist/match.js",
+      "require": "./dist/match.cjs"
+    },
+    "./schedule": {
+      "types": "./dist/schedule.d.ts",
+      "import": "./dist/schedule.js",
+      "require": "./dist/schedule.cjs"
     }
   },
   "files": [
@@ -100,7 +115,7 @@
     "@ianvs/prettier-plugin-sort-imports": "^4.7.0",
     "@total-typescript/ts-reset": "^0.6.1",
     "@total-typescript/tsconfig": "^1.0.4",
-    "@types/node": "^25.0.8",
+    "@types/node": "^25.0.9",
     "@types/picomatch": "^4.0.2",
     "@typescript-eslint/eslint-plugin": "^8.53.0",
     "@typescript-eslint/parser": "^8.53.0",

@@ -618,3 +618,88 @@ export {
   createResource,
   isResourceCleanupError,
 } from "./resource";
+
+// =============================================================================
+// Duration - Type-safe time units
+// =============================================================================
+
+export {
+  // Types
+  type Duration as DurationType,
+
+  // Namespace
+  Duration,
+
+  // Individual exports (for tree-shaking)
+  millis,
+  seconds,
+  minutes,
+  hours,
+  days,
+  toMillis,
+  toSeconds,
+  toMinutes,
+  toHours,
+  toDays,
+  isDuration,
+} from "./duration";
+
+// =============================================================================
+// Match - Exhaustive pattern matching
+// =============================================================================
+
+export {
+  // Types
+  type Tagged,
+  type Matcher,
+
+  // Namespace
+  Match,
+
+  // Individual exports
+  matchValue,
+  tag as matchTag,
+  tags as matchTags,
+  exhaustive,
+  orElse as matchOrElse,
+  orElseValue,
+  is as isTag,
+  isOneOf,
+} from "./match";
+
+// =============================================================================
+// Schedule - Composable scheduling primitives
+// =============================================================================
+
+export {
+  // Types
+  type Schedule as ScheduleType,
+  type ScheduleState,
+  type ScheduleDecision,
+
+  // Namespace
+  Schedule,
+
+  // Individual exports (for tree-shaking)
+  forever,
+  recurs,
+  spaced,
+  exponential,
+  linear,
+  fibonacci,
+  upTo,
+  upToElapsed,
+  maxDelay,
+  minDelay,
+  whileInput,
+  whileOutput,
+  untilInput,
+  untilOutput,
+  jittered,
+  addDelay,
+  andThen as scheduleAndThen,
+  union as scheduleUnion,
+  intersect,
+  modifyDelay,
+  delays,
+} from "./schedule";

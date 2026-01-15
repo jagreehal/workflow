@@ -374,6 +374,118 @@ const apiPolicy = envPolicy({
 });
 ```
 
+## Real-World Scenarios
+
+### Microservices: Different Strategies per Service Type
+
+Your application talks to multiple services with different reliability characteristics. Database calls need short timeouts; payment APIs need longer timeouts with more retries.
+
+```typescript
+import { mergePolicies, createPolicyRegistry, retryPolicies, timeoutPolicies, circuitBreakerPolicies } from '@jagreehal/workflow';
+
+const registry = createPolicyRegistry({
+  database: mergePolicies(
+    timeoutPolicies.short,           // 5s timeout
+    retryPolicies.quick,             // 2 retries, fast backoff
+    circuitBreakerPolicies.sensitive // Opens after 3 failures
+  ),
+
+  paymentApi: mergePolicies(
+    timeoutPolicies.medium,          // 30s timeout
+    retryPolicies.standard,          // 3 retries, exponential backoff
+    circuitBreakerPolicies.default   // Opens after 5 failures
+  ),
+
+  emailService: mergePolicies(
+    timeoutPolicies.short,
+    retryPolicies.aggressive,        // Many retries, it's not critical
+    circuitBreakerPolicies.tolerant  // Opens after 10 failures
+  ),
+
+  analyticsApi: mergePolicies(
+    timeoutPolicies.fast,            // 2s timeout
+    retryPolicies.none               // Fire and forget
+  ),
+});
+
+// Usage
+await step(() => db.query(...), registry.get("database"));
+await step(() => stripe.charge(...), registry.get("paymentApi"));
+```
+
+Why this works: Each service type has appropriate resilience characteristics. Database calls fail fast; payment calls are patient but protected by circuit breakers.
+
+### Payment Processing: Provider-Specific Policies
+
+You support multiple payment providers, each with different rate limits and reliability patterns.
+
+```typescript
+import { conditionalPolicy, mergePolicies, retryPolicies, timeoutPolicies } from '@jagreehal/workflow';
+
+const paymentPolicy = (provider: "stripe" | "paypal" | "square") =>
+  conditionalPolicy(
+    provider === "stripe",
+    mergePolicies(
+      timeoutPolicies.medium,
+      { retry: { maxAttempts: 3, baseDelay: 200, maxDelay: 5000 } }
+    ),
+    conditionalPolicy(
+      provider === "paypal",
+      mergePolicies(
+        timeoutPolicies.long,  // PayPal can be slow
+        { retry: { maxAttempts: 5, baseDelay: 1000, maxDelay: 30000 } }
+      ),
+      // Square: fast but strict rate limits
+      mergePolicies(
+        timeoutPolicies.short,
+        { retry: { maxAttempts: 2, baseDelay: 500 } }
+      )
+    )
+  );
+
+// Usage
+await step(
+  () => processPayment(provider, amount),
+  paymentPolicy(provider)
+);
+```
+
+Why this works: Each provider gets retry behavior tuned to its API characteristics. Stripe is reliable so fewer retries; PayPal can be slow so longer timeouts.
+
+### Environment-Based Behavior: Fast in Dev, Safe in Production
+
+Your local development should fail fast (no waiting for retries), but production needs full resilience.
+
+```typescript
+import { envPolicy, mergePolicies, retryPolicies, timeoutPolicies, circuitBreakerPolicies } from '@jagreehal/workflow';
+
+const apiPolicy = envPolicy({
+  production: mergePolicies(
+    timeoutPolicies.medium,
+    retryPolicies.standard,
+    circuitBreakerPolicies.default
+  ),
+
+  staging: mergePolicies(
+    timeoutPolicies.short,
+    retryPolicies.quick,
+    circuitBreakerPolicies.sensitive
+  ),
+
+  development: mergePolicies(
+    timeoutPolicies.fast,
+    retryPolicies.none  // Fail immediately to see errors
+  ),
+
+  test: retryPolicies.none  // Tests should be deterministic
+});
+
+// Same code works in all environments
+await step(() => api.fetch(...), apiPolicy);
+```
+
+Why this works: Developers see failures immediately. Production systems are resilient. Tests are predictable. One policy definition handles all environments.
+
 ## When NOT to Use This
 
 - **Simple scripts** - Inline options are fine for one-off code

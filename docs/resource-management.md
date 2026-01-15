@@ -340,6 +340,149 @@ if (!result.ok) {
 }
 ```
 
+## Real-World Scenarios
+
+### Database Transaction with File Upload
+
+You're processing an order that requires both a database transaction and uploading a receipt to S3. If either fails, both must be rolled back.
+
+```typescript
+import { withScope, ok, err } from '@jagreehal/workflow';
+
+async function processOrder(orderId: string, receiptData: Buffer) {
+  return withScope(async (scope) => {
+    // Track if transaction is committed to avoid rollback on success
+    let committed = false;
+    
+    // Start transaction - rolled back on failure
+    const tx = scope.add({
+      value: await db.beginTransaction(),
+      close: async () => {
+        // Only rollback if not committed
+        if (!committed) {
+          await tx.rollback();
+        }
+      },
+    });
+
+    // Upload receipt - deleted on failure
+    const receiptKey = `receipts/${orderId}.pdf`;
+    scope.add({
+      value: await s3.upload(receiptKey, receiptData),
+      close: async () => {
+        await s3.delete(receiptKey);
+      },
+    });
+
+    // Do the work
+    await tx.execute('UPDATE orders SET status = ? WHERE id = ?', ['completed', orderId]);
+    await tx.execute('INSERT INTO receipts (order_id, s3_key) VALUES (?, ?)', [orderId, receiptKey]);
+
+    // Commit transaction - mark as committed so rollback doesn't run
+    await tx.commit();
+    committed = true;
+
+    return ok({ orderId, receiptKey });
+  });
+}
+```
+
+Why this works: If the database commit fails, the S3 file is automatically deleted. If S3 upload fails, the transaction is automatically rolled back. No orphaned files, no partial commits.
+
+### Multi-Tenant Data Export
+
+You're exporting data for multiple tenants, each requiring a temporary directory and database connection. If any tenant fails, clean up their resources but continue with others.
+
+```typescript
+import { withScope, ok } from '@jagreehal/workflow';
+
+// Helper functions for temp directory management
+async function createTempDir(tenantId: string): Promise<string> {
+  const dir = `/tmp/export-${tenantId}-${Date.now()}`;
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+async function releaseTempDir(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true });
+}
+
+async function exportTenantData(tenantId: string) {
+  return withScope(async (scope) => {
+    // Temp directory - cleaned up on success or failure
+    const exportDir = scope.add({
+      value: await createTempDir(tenantId),
+      close: async () => {
+        await releaseTempDir(exportDir);
+      },
+    });
+
+    // Tenant database connection - closed when done
+    const conn = scope.add({
+      value: await getTenantConnection(tenantId),
+      close: async () => {
+        await conn.close();
+      },
+    });
+
+    // Export data to temp directory
+    const data = await conn.query('SELECT * FROM user_data');
+    await fs.writeFile(`${exportDir}/data.json`, JSON.stringify(data));
+
+    // Upload to permanent storage
+    const zipPath = `${exportDir}/export.zip`;
+    await zipDirectory(exportDir, zipPath);
+    await s3.upload(`exports/${tenantId}/${Date.now()}.zip`, zipPath);
+
+    return ok({ tenantId, recordCount: data.length });
+  });
+}
+```
+
+Why this works: Each tenant's temp directory and connection are cleaned up regardless of success or failure. One tenant's error doesn't leave resources hanging for others.
+
+### Webhook Processing with Temporary Credentials
+
+You're processing webhooks that require temporary AWS credentials and a distributed lock. Both must be released properly.
+
+```typescript
+import { withScope, ok, err } from '@jagreehal/workflow';
+
+async function processWebhook(webhookId: string, payload: unknown) {
+  return withScope(async (scope) => {
+    // Acquire distributed lock - released on exit
+    const lock = scope.add({
+      value: await redis.lock(`webhook:${webhookId}`, { ttl: 30000 }),
+      close: async () => {
+        await lock.release();
+      },
+    });
+
+    // Get temporary credentials - no cleanup needed (they expire)
+    const creds = await sts.assumeRole({
+      RoleArn: 'arn:aws:iam::xxx:role/webhook-processor',
+      DurationSeconds: 900
+    });
+
+    // Create S3 client with temp creds
+    const s3 = new S3Client({ credentials: creds });
+
+    // Process the webhook
+    const result = await processPayload(payload, s3);
+
+    // Store result - lock prevents duplicate processing
+    await db.execute(
+      'INSERT INTO webhook_results (id, result) VALUES (?, ?)',
+      [webhookId, JSON.stringify(result)]
+    );
+
+    return ok(result);
+  });
+}
+```
+
+Why this works: The distributed lock is always released, even if processing fails. No deadlocks from crashed handlers. Temporary credentials expire naturally, so no cleanup needed.
+
 ## When to Use This
 
 - **Multiple resources** - Managing 2+ resources that need cleanup

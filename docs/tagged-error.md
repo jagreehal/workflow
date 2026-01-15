@@ -591,6 +591,118 @@ const error = new DependencyFailed({
 });
 ```
 
+## Real-World Scenarios
+
+### E-Commerce Checkout: Handle Payment, Inventory, and Fraud
+
+Your checkout flow talks to multiple services. Each can fail differently, but your business logic only cares about a few outcomes.
+
+```typescript
+import { TaggedError } from '@jagreehal/workflow';
+
+// Domain errors - what the business cares about
+class PaymentDeclined extends TaggedError("PaymentDeclined")<{
+  reason: string;
+  canRetry: boolean;
+}> {}
+
+class OutOfStock extends TaggedError("OutOfStock")<{
+  productId: string;
+  requested: number;
+  available: number;
+}> {}
+
+class FraudDetected extends TaggedError("FraudDetected")<{
+  riskScore: number;
+  flaggedRules: string[];
+}> {}
+
+// Adapter error - collapses infrastructure failures
+class CheckoutServiceFailed extends TaggedError("CheckoutServiceFailed")<{
+  service: "payment" | "inventory" | "fraud";
+  retryable: boolean;
+  cause: unknown;
+}> {}
+
+type CheckoutError = PaymentDeclined | OutOfStock | FraudDetected | CheckoutServiceFailed;
+```
+
+Why this works: Your checkout handler sees exactly 4 error types regardless of whether Stripe returns 47 different error codes or your inventory service uses gRPC with its own error taxonomy.
+
+### API Gateway: Collapse External Service Failures
+
+You're building an API that aggregates data from multiple microservices. Each service has its own error types, but your API consumers don't care about that complexity.
+
+```typescript
+import { TaggedError } from '@jagreehal/workflow';
+
+// What API consumers see
+class NotFound extends TaggedError("NotFound")<{
+  resource: string;
+  id: string;
+}> {}
+
+class Unauthorized extends TaggedError("Unauthorized")<{
+  reason: "invalid_token" | "expired" | "insufficient_scope";
+}> {}
+
+class ServiceUnavailable extends TaggedError("ServiceUnavailable")<{
+  service: string;
+  retryAfterMs?: number;
+}> {}
+
+// Adapter function that collapses internal errors
+function collapseServiceError(service: string, error: unknown): ServiceUnavailable {
+  const retryable = error instanceof Error &&
+    ("code" in error && (error.code === "ECONNRESET" || error.code === "ETIMEDOUT"));
+
+  return new ServiceUnavailable({
+    service,
+    retryAfterMs: retryable ? 5000 : undefined,
+  });
+}
+```
+
+Why this works: Your API returns consistent error responses. Internal service chaos (database timeouts, cache misses, gRPC errors) becomes one clean `ServiceUnavailable` type.
+
+### Data Pipeline: Validate, Transform, Load
+
+Your ETL pipeline processes records from external sources. You need to distinguish between bad data (skip the record) and system failures (stop the pipeline).
+
+```typescript
+import { TaggedError } from '@jagreehal/workflow';
+
+// Record-level errors - skip the record, continue processing
+class ValidationFailed extends TaggedError("ValidationFailed")<{
+  recordId: string;
+  field: string;
+  expected: string;
+  actual: string;
+}> {}
+
+class TransformFailed extends TaggedError("TransformFailed")<{
+  recordId: string;
+  step: string;
+  reason: string;
+}> {}
+
+// Pipeline-level errors - stop processing
+class SourceUnavailable extends TaggedError("SourceUnavailable")<{
+  source: string;
+  retryable: boolean;
+}> {}
+
+class DestinationFailed extends TaggedError("DestinationFailed")<{
+  destination: string;
+  recordsLost: number;
+}> {}
+
+type RecordError = ValidationFailed | TransformFailed;
+type PipelineError = SourceUnavailable | DestinationFailed;
+```
+
+Why this works: Your pipeline can handle record errors (log and continue) differently from pipeline errors (alert and stop). The type system enforces this distinction.
+
 ## When NOT to Use This
 
 This pattern adds ceremony. Skip it when:

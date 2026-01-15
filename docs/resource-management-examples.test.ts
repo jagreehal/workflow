@@ -560,6 +560,161 @@ describe("resource-management", () => {
       expect(logger.error).toHaveBeenCalled();
     });
   });
+
+  // ============================================================================
+  // Real-World Scenarios
+  // ============================================================================
+
+  describe("real-world scenarios", () => {
+    describe("Database Transaction with File Upload", () => {
+      it("rolls back transaction and deletes file on failure", async () => {
+        const rollbackCalls: string[] = [];
+        const deleteCalls: string[] = [];
+
+        const mockDb = {
+          beginTransaction: async () => ({
+            execute: async (_sql: string, _params: unknown[]) => {},
+            commit: async () => {},
+            rollback: async () => {
+              rollbackCalls.push("rollback");
+            },
+          }),
+        };
+
+        const mockS3 = {
+          upload: async (_key: string, _data: unknown) => ({ key: "receipts/123.pdf" }),
+          delete: async (_key: string) => {
+            deleteCalls.push("delete");
+          },
+        };
+
+        async function processOrder(orderId: string, _receiptData: Buffer) {
+          return withScope(async (scope) => {
+            // In failure case, committed stays false
+            const committed = false;
+
+            const tx = scope.add({
+              value: await mockDb.beginTransaction(),
+              close: async () => {
+                if (!committed) {
+                  await tx.rollback();
+                }
+              },
+            });
+
+            const receiptKey = `receipts/${orderId}.pdf`;
+            scope.add({
+              value: await mockS3.upload(receiptKey, Buffer.from("data")),
+              close: async () => {
+                await mockS3.delete(receiptKey);
+              },
+            });
+
+            // Simulate failure before commit - return error result
+            return err("PROCESSING_FAILED" as const);
+          });
+        }
+
+        const result = await processOrder("123", Buffer.from("data"));
+
+        expect(result.ok).toBe(false);
+        expect(rollbackCalls).toContain("rollback");
+        expect(deleteCalls).toContain("delete");
+      });
+    });
+
+    describe("Multi-Tenant Data Export", () => {
+      it("cleans up resources for each tenant", async () => {
+        const cleanupCalls: string[] = [];
+
+        async function createTempDir(tenantId: string): Promise<string> {
+          return `/tmp/export-${tenantId}-${Date.now()}`;
+        }
+
+        async function releaseTempDir(dir: string): Promise<void> {
+          cleanupCalls.push(`cleanup-${dir}`);
+        }
+
+        const mockConn = {
+          query: async (_sql: string) => [{ id: "1" }, { id: "2" }],
+          close: async () => {
+            cleanupCalls.push("close-conn");
+          },
+        };
+
+        async function getTenantConnection(_tenantId: string) {
+          return mockConn;
+        }
+
+        async function exportTenantData(tenantId: string) {
+          return withScope(async (scope) => {
+            const exportDir = scope.add({
+              value: await createTempDir(tenantId),
+              close: async () => {
+                await releaseTempDir(exportDir);
+              },
+            });
+
+            const conn = scope.add({
+              value: await getTenantConnection(tenantId),
+              close: async () => {
+                await conn.close();
+              },
+            });
+
+            const data = await conn.query("SELECT * FROM user_data");
+
+            return ok({ tenantId, recordCount: data.length });
+          });
+        }
+
+        const result = await exportTenantData("tenant-1");
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.recordCount).toBe(2);
+        }
+        // Resources should be cleaned up
+        expect(cleanupCalls.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe("Webhook Processing with Temporary Credentials", () => {
+      it("releases lock even on failure", async () => {
+        const releaseCalls: string[] = [];
+
+        const mockLock = {
+          release: async () => {
+            releaseCalls.push("lock-released");
+          },
+        };
+
+        const mockRedis = {
+          lock: async (_key: string, _opts: unknown) => mockLock,
+        };
+
+        async function processWebhook(webhookId: string, _payload: unknown) {
+          return withScope(async (scope) => {
+            const lock = scope.add({
+              value: await mockRedis.lock(`webhook:${webhookId}`, { ttl: 30000 }),
+              close: async () => {
+                await lock.release();
+              },
+            });
+
+            // Simulate processing failure - return error result instead of throwing
+            return err("PROCESSING_FAILED" as const);
+          });
+        }
+
+        const result = await processWebhook("webhook-123", {});
+
+        expect(result.ok).toBe(false);
+        // Lock should be released even on failure
+        expect(releaseCalls).toContain("lock-released");
+      });
+    });
+  });
 });
 
 // ============================================================================

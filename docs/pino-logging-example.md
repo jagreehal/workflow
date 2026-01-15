@@ -1,10 +1,113 @@
 # Logging Workflow Events to Pino
 
-Workflow events are structured JSON objects that work perfectly with Pino's structured logging. You can collect events during execution and log them after completion.
+Workflow events are structured JSON objects that work perfectly with Pino's structured logging.
 
-## Logging ASCII Visualization
+## Using `renderAs('logger')` (Recommended)
 
-You can also log the ASCII visualization output to Pino. The multi-line ASCII diagram will be included as a string field in the log entry.
+The easiest way to log workflow data is using the built-in logger renderer:
+
+```typescript
+import { createWorkflow, createVisualizer } from '@jagreehal/workflow';
+import pino from 'pino';
+
+const logger = pino();
+const viz = createVisualizer({ workflowName: 'checkout' });
+
+const workflow = createWorkflow({ fetchUser, processPayment }, {
+  onEvent: viz.handleEvent,
+});
+
+const result = await workflow(async (step) => {
+  const user = await step(() => fetchUser('1'), { name: 'Fetch user' });
+  await step(() => processPayment(user.id), { name: 'Process payment' });
+});
+
+// Log structured workflow data
+// Note: renderAs() returns a JSON string for API consistency across renderers
+const logData = JSON.parse(viz.renderAs('logger'));
+logger.info(logData, 'Workflow completed');
+```
+
+### Logger Output
+
+The renderer returns this structure (Pino will add `level`, `time`, and `msg` when logging):
+
+```json
+{
+  "workflow": {
+    "id": "8757b92c-d415-4555-93cd-37076cbec9ee",
+    "name": "checkout",
+    "state": "success",
+    "durationMs": 33,
+    "startedAt": 1768506411038
+  },
+  "steps": [
+    {
+      "id": "user:1",
+      "name": "Fetch user",
+      "state": "success",
+      "durationMs": 11
+    },
+    {
+      "id": "payment:1",
+      "name": "Process payment",
+      "state": "success",
+      "durationMs": 21,
+      "retryCount": 1
+    }
+  ],
+  "summary": {
+    "totalSteps": 2,
+    "successCount": 2,
+    "errorCount": 0,
+    "cacheHits": 0,
+    "totalRetries": 1,
+    "slowestStep": { "name": "Process payment", "durationMs": 21 }
+  },
+  "diagram": "┌── checkout ─────────────────────┐\n│  ✓ Fetch user [11ms]           │\n│  ✓ Process payment [21ms]      │\n└─────────────────────────────────┘"
+}
+```
+
+### Works With Any Logger
+
+The logger renderer is logger-agnostic:
+
+```typescript
+// Pino
+logger.info(JSON.parse(viz.renderAs('logger')), 'Workflow completed');
+
+// Winston
+logger.info('Workflow completed', JSON.parse(viz.renderAs('logger')));
+
+// Console
+console.log('Workflow completed:', JSON.parse(viz.renderAs('logger')));
+
+// OpenTelemetry
+span.addEvent('workflow_completed', JSON.parse(viz.renderAs('logger')));
+```
+
+### Why Use `renderAs('logger')`?
+
+- **Structured data**: Workflow state, step details, and summary stats as queryable fields
+- **Summary calculations**: Slowest step, retry counts, error counts computed for you
+- **ASCII diagram included**: ANSI colors stripped for clean JSON
+- **One call**: No need to parse events manually
+
+### When to Use Each Approach
+
+| Use Case | Recommended Approach |
+|----------|---------------------|
+| Log workflow summary after completion | `renderAs('logger')` |
+| Need custom filtering of steps/events | Manual approach |
+| Real-time logging during execution | Manual approach with `onEvent` |
+| Just want structured output quickly | `renderAs('logger')` |
+| Need to transform events before logging | Manual approach |
+
+---
+
+## Manual Approach (More Control)
+
+For more control over what gets logged, you can collect events manually.
 
 ## Basic Example
 

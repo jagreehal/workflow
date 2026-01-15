@@ -351,7 +351,7 @@ export interface Renderer {
 /**
  * Output format for rendering.
  */
-export type OutputFormat = "ascii" | "mermaid" | "json";
+export type OutputFormat = "ascii" | "mermaid" | "json" | "logger";
 
 /**
  * Options for creating a visualizer.

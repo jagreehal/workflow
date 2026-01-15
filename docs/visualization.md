@@ -95,6 +95,41 @@ flowchart TD
 
 Paste into GitHub, Notion, or any Mermaid-compatible tool.
 
+#### Enhanced Mermaid Edges
+
+Mermaid diagrams now show retry loops, error paths, and timeouts as visual edges (not just labels):
+
+```mermaid
+flowchart TD
+    A["✓ Fetch user 45ms"] --> B["✗ Process payment 201ms"]
+    A -.->|"↻ 2 retries"| A
+    B -->|error| ERR{{PAYMENT_FAILED}}
+    B -.->|timeout| TO{{⏱ Timeout 5000ms}}
+    style ERR fill:#fee2e2,stroke:#dc2626
+    style TO fill:#fef3c7,stroke:#f59e0b
+```
+
+**What the edges show:**
+
+- **Retry loops** (`-.->`) - Self-loop showing how many retries occurred
+- **Error paths** (`-->|error|`) - Flow to error node showing the error value
+- **Timeout paths** (`-.->|timeout|`) - Dashed edge to timeout node
+
+These are enabled by default. To disable, pass options when rendering:
+
+```typescript
+import type { MermaidRenderOptions } from '@jagreehal/workflow/visualize';
+
+const options: MermaidRenderOptions = {
+  showTimings: true,
+  showKeys: false,
+  colors: defaultColorScheme,
+  showRetryEdges: false,    // Hide retry self-loops
+  showErrorEdges: false,    // Hide error path edges
+  showTimeoutEdges: false,  // Hide timeout path edges
+};
+```
+
 ### JSON (IR)
 
 ```typescript

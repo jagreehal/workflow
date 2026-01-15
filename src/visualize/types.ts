@@ -314,6 +314,19 @@ export interface RenderOptions {
 }
 
 /**
+ * Extended options for Mermaid renderer.
+ * Controls how edges are displayed for retries, errors, and timeouts.
+ */
+export interface MermaidRenderOptions extends RenderOptions {
+  /** Show retry as self-loop edge (default: true) */
+  showRetryEdges?: boolean;
+  /** Show error flow to error node (default: true) */
+  showErrorEdges?: boolean;
+  /** Show timeout as alternative path (default: true) */
+  showTimeoutEdges?: boolean;
+}
+
+/**
  * Renderer interface - transforms IR to output format.
  */
 export interface Renderer {

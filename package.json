@@ -117,6 +117,7 @@
     "@total-typescript/tsconfig": "^1.0.4",
     "@types/node": "^25.0.9",
     "@types/picomatch": "^4.0.2",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.53.0",
     "@typescript-eslint/parser": "^8.53.0",
     "@typescript-eslint/rule-tester": "^8.53.0",
@@ -125,11 +126,14 @@
     "eslint": "9.39.2",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-unicorn": "^62.0.0",
+    "jsdom": "^27.4.0",
+    "mermaid": "^11.12.2",
     "tsd": "^0.33.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.53.0",
-    "vitest": "^4.0.17"
+    "vitest": "^4.0.17",
+    "ws": "^8.19.0"
   },
   "engines": {
     "node": ">=18.0.0"

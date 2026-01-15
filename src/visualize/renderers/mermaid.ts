@@ -12,6 +12,7 @@ import type {
   DecisionNode,
   Renderer,
   RenderOptions,
+  MermaidRenderOptions,
   StepNode,
   StepState,
   WorkflowIR,
@@ -316,6 +317,12 @@ function renderStepNode(
   enhanced?: EnhancedRenderOptions,
   hooks?: WorkflowHooks
 ): RenderResult {
+  // Cast to MermaidRenderOptions to access extended options
+  const mermaidOpts = options as MermaidRenderOptions;
+  const showRetryEdges = mermaidOpts.showRetryEdges ?? true;
+  const showErrorEdges = mermaidOpts.showErrorEdges ?? true;
+  const showTimeoutEdges = mermaidOpts.showTimeoutEdges ?? true;
+
   const id = node.key
     ? `step_${node.key.replace(/[^a-zA-Z0-9]/g, "_")}`
     : generateNodeId("step");
@@ -364,16 +371,6 @@ function renderStepNode(
     ioInfo += `\\nout: ${outputStr}`;
   }
 
-  // Add retry/timeout indicators with icons
-  let retryInfo = "";
-  if (node.retryCount !== undefined && node.retryCount > 0) {
-    retryInfo += `\\n↻ ${node.retryCount} retr${node.retryCount === 1 ? "y" : "ies"}`;
-  }
-  if (node.timedOut) {
-    const timeoutStr = node.timeoutMs !== undefined ? `${node.timeoutMs}ms` : "";
-    retryInfo += `\\n⏱ timeout ${timeoutStr}`;
-  }
-
   // Add onAfterStep hook info if present
   let hookInfo = "";
   if (hooks && node.key && hooks.onAfterStep.has(node.key)) {
@@ -385,8 +382,8 @@ function renderStepNode(
     hookInfo = `\\n${hookIcon} hook${hookTiming}`;
   }
 
-  // Combine all label parts with icon
-  const escapedLabel = (stateIcon + label + ioInfo + retryInfo + hookInfo + timing).trim();
+  // Combine all label parts with icon (retry/timeout info moved to edges)
+  const escapedLabel = (stateIcon + label + ioInfo + hookInfo + timing).trim();
 
   // Determine class: use heatmap if enabled and data available, otherwise use state
   let nodeClass: string;
@@ -423,6 +420,30 @@ function renderStepNode(
   }
 
   lines.push(`    ${id}${shape}:::${nodeClass}`);
+
+  // NEW: Add retry loop edge (self-loop showing retries)
+  if (showRetryEdges && node.retryCount !== undefined && node.retryCount > 0) {
+    const retryLabel = `↻ ${node.retryCount} retr${node.retryCount === 1 ? "y" : "ies"}`;
+    lines.push(`    ${id} -.->|"${retryLabel}"| ${id}`);
+  }
+
+  // NEW: Add error path edge (flow to error node)
+  if (showErrorEdges && node.state === "error" && node.error !== undefined) {
+    const errorNodeId = `ERR_${id}`;
+    const errorLabel = escapeMermaidText(String(node.error)).slice(0, 30);
+    lines.push(`    ${errorNodeId}{{${errorLabel}}}`);
+    lines.push(`    ${id} -->|error| ${errorNodeId}`);
+    lines.push(`    style ${errorNodeId} fill:#fee2e2,stroke:#dc2626`);
+  }
+
+  // NEW: Add timeout edge (alternative timeout path)
+  if (showTimeoutEdges && node.timedOut) {
+    const timeoutNodeId = `TO_${id}`;
+    const timeoutMs = node.timeoutMs !== undefined ? `${node.timeoutMs}ms` : "";
+    lines.push(`    ${timeoutNodeId}{{⏱ Timeout ${timeoutMs}}}`);
+    lines.push(`    ${id} -.->|timeout| ${timeoutNodeId}`);
+    lines.push(`    style ${timeoutNodeId} fill:#fef3c7,stroke:#f59e0b`);
+  }
 
   return { entryId: id, exitId: id };
 }

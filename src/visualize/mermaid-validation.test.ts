@@ -1,14 +1,36 @@
 /**
  * Test Mermaid validation - ensure all generated Mermaid code is valid
- * 
+ *
  * This test generates Mermaid diagrams with various edge cases and validates
  * they render correctly without parse errors.
+ *
+ * @vitest-environment jsdom
  */
 
-import { describe, it, expect } from "vitest";
-import { ok, type AsyncResult } from "../core";
+import { describe, it, expect, beforeAll } from "vitest";
+import { ok, err, type AsyncResult } from "../core";
 import { createWorkflow } from "../workflow";
-import { createEventCollector } from "./index";
+import { createEventCollector, createVisualizer, type MermaidRenderOptions, defaultColorScheme } from "./index";
+import mermaid from "mermaid";
+
+// Initialize mermaid for parsing (no DOM needed for parse-only)
+beforeAll(() => {
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "loose",
+  });
+});
+
+/**
+ * Validate that a Mermaid diagram string is syntactically valid.
+ * Throws if the diagram cannot be parsed.
+ */
+async function validateMermaid(diagram: string): Promise<void> {
+  const result = await mermaid.parse(diagram);
+  if (!result) {
+    throw new Error("Mermaid parse returned false");
+  }
+}
 
 // Test functions with special characters in names/keys
 const fetchUserWithSpecialChars = async (
@@ -38,10 +60,12 @@ describe("Mermaid Validation - Special Characters", () => {
       });
     });
 
-    const mermaid = collector.visualizeAs("mermaid");
+    const diagram = collector.visualizeAs("mermaid");
     // Should not contain unescaped parentheses in node labels
-    expect(mermaid).not.toMatch(/\[.*\(.*\).*\]/);
-    expect(mermaid).toContain("flowchart TD");
+    expect(diagram).not.toMatch(/\[.*\(.*\).*\]/);
+    expect(diagram).toContain("flowchart TD");
+    // Validate with mermaid parser
+    await validateMermaid(diagram);
   });
 
   it("should handle step names with brackets", async () => {
@@ -58,10 +82,11 @@ describe("Mermaid Validation - Special Characters", () => {
       });
     });
 
-    const mermaid = collector.visualizeAs("mermaid");
+    const diagram = collector.visualizeAs("mermaid");
     // Should not contain unescaped brackets in node labels
-    expect(mermaid).not.toMatch(/\[.*\[.*\].*\]/);
-    expect(mermaid).toContain("flowchart TD");
+    expect(diagram).not.toMatch(/\[.*\[.*\].*\]/);
+    expect(diagram).toContain("flowchart TD");
+    await validateMermaid(diagram);
   });
 
   it("should handle step names with quotes", async () => {
@@ -78,10 +103,11 @@ describe("Mermaid Validation - Special Characters", () => {
       });
     });
 
-    const mermaid = collector.visualizeAs("mermaid");
+    const diagram = collector.visualizeAs("mermaid");
     // Should not contain double quotes (should be replaced with single)
-    expect(mermaid).not.toMatch(/\[.*".*".*\]/);
-    expect(mermaid).toContain("flowchart TD");
+    expect(diagram).not.toMatch(/\[.*".*".*\]/);
+    expect(diagram).toContain("flowchart TD");
+    await validateMermaid(diagram);
   });
 
   it("should handle parallel subgraph names with special chars", async () => {
@@ -98,10 +124,11 @@ describe("Mermaid Validation - Special Characters", () => {
       });
     });
 
-    const mermaid = collector.visualizeAs("mermaid");
+    const diagram = collector.visualizeAs("mermaid");
     // Should not contain unescaped parentheses in subgraph names
-    expect(mermaid).not.toMatch(/subgraph.*\[.*\(.*\).*\]/);
-    expect(mermaid).toContain("flowchart TD");
+    expect(diagram).not.toMatch(/subgraph.*\[.*\(.*\).*\]/);
+    expect(diagram).toContain("flowchart TD");
+    await validateMermaid(diagram);
   });
 
   it("should handle race subgraph names with special chars", async () => {
@@ -120,10 +147,11 @@ describe("Mermaid Validation - Special Characters", () => {
       );
     });
 
-    const mermaid = collector.visualizeAs("mermaid");
+    const diagram = collector.visualizeAs("mermaid");
     // Should not contain unescaped brackets in subgraph names
-    expect(mermaid).not.toMatch(/subgraph.*\[.*\[.*\].*\]/);
-    expect(mermaid).toContain("flowchart TD");
+    expect(diagram).not.toMatch(/subgraph.*\[.*\[.*\].*\]/);
+    expect(diagram).toContain("flowchart TD");
+    await validateMermaid(diagram);
   });
 
   it("should handle all edge cases together", async () => {
@@ -149,19 +177,163 @@ describe("Mermaid Validation - Special Characters", () => {
       });
 
       // Process with brackets
-      await step(() => deps.processDataWithBrackets(user), {
+      await step(() => deps.processDataWithBrackets({ value: user.name }), {
         key: "process",
         name: "Process {data}",
       });
     });
 
-    const mermaid = collector.visualizeAs("mermaid");
-    
+    const diagram = collector.visualizeAs("mermaid");
+
     // Validate no invalid characters
-    expect(mermaid).toContain("flowchart TD");
+    expect(diagram).toContain("flowchart TD");
     // Should not have unescaped brackets/parens in labels
-    expect(mermaid).not.toMatch(/\[.*\([^)]*\).*\]/); // No unescaped parens in brackets
-    expect(mermaid).not.toMatch(/\[.*\[[^\]]*\].*\]/); // No nested brackets
-    expect(mermaid).not.toMatch(/\[.*".*".*\]/); // No double quotes
+    expect(diagram).not.toMatch(/\[.*\([^)]*\).*\]/); // No unescaped parens in brackets
+    expect(diagram).not.toMatch(/\[.*\[[^\]]*\].*\]/); // No nested brackets
+    expect(diagram).not.toMatch(/\[.*".*".*\]/); // No double quotes
+    await validateMermaid(diagram);
+  });
+});
+
+describe("Mermaid Enhanced Edges", () => {
+  it("should render retry loop edges for steps with retries", async () => {
+    let attempts = 0;
+    const failingThenSucceed = async (): AsyncResult<string, "FAIL"> => {
+      attempts++;
+      if (attempts < 3) {
+        return err("FAIL");
+      }
+      return ok("success");
+    };
+
+    const collector = createEventCollector({ workflowName: "retry-test" });
+
+    const workflow = createWorkflow({ failingThenSucceed }, {
+      onEvent: collector.handleEvent,
+    });
+
+    await workflow(async (step, deps) => {
+      await step(() => deps.failingThenSucceed(), {
+        key: "retrying-step",
+        name: "Retrying Operation",
+        retry: { attempts: 3 },
+      });
+    });
+
+    const diagram = collector.visualizeAs("mermaid");
+
+    // Should contain retry self-loop edge
+    expect(diagram).toContain("-.->|");
+    expect(diagram).toMatch(/retr(y|ies)/);
+    expect(diagram).toContain("flowchart TD");
+    await validateMermaid(diagram);
+  });
+
+  it("should render error path edges for failed steps", async () => {
+    const alwaysFails = async (): AsyncResult<string, "ALWAYS_FAILS"> => {
+      return err("ALWAYS_FAILS");
+    };
+
+    const collector = createEventCollector({ workflowName: "error-test" });
+
+    const workflow = createWorkflow({ alwaysFails }, {
+      onEvent: collector.handleEvent,
+    });
+
+    await workflow(async (step, deps) => {
+      await step(() => deps.alwaysFails(), {
+        key: "failing-step",
+        name: "Failing Operation",
+      });
+    });
+
+    const diagram = collector.visualizeAs("mermaid");
+
+    // Should contain error path edge
+    expect(diagram).toContain("-->|error|");
+    expect(diagram).toContain("ERR_");
+    expect(diagram).toContain("ALWAYS_FAILS");
+    // Should have error styling
+    expect(diagram).toContain("fill:#fee2e2");
+    expect(diagram).toContain("flowchart TD");
+    await validateMermaid(diagram);
+  });
+
+  it("should render timeout edges for timed out steps", async () => {
+    const slowOperation = async (): AsyncResult<string, "TIMEOUT"> => {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      return ok("done");
+    };
+
+    const collector = createEventCollector({ workflowName: "timeout-test" });
+
+    const workflow = createWorkflow({ slowOperation }, {
+      onEvent: collector.handleEvent,
+    });
+
+    await workflow(async (step, deps) => {
+      await step(() => deps.slowOperation(), {
+        key: "slow-step",
+        name: "Slow Operation",
+        timeout: { ms: 50 },
+      });
+    });
+
+    const diagram = collector.visualizeAs("mermaid");
+
+    // Should contain timeout edge
+    expect(diagram).toContain("-.->|timeout|");
+    expect(diagram).toContain("TO_");
+    expect(diagram).toContain("⏱ Timeout");
+    // Should have timeout styling
+    expect(diagram).toContain("fill:#fef3c7");
+    expect(diagram).toContain("flowchart TD");
+    await validateMermaid(diagram);
+  });
+
+  it("should allow disabling enhanced edges via options", async () => {
+    let attempts = 0;
+    const failingThenSucceed = async (): AsyncResult<string, "FAIL"> => {
+      attempts++;
+      if (attempts < 2) {
+        return err("FAIL");
+      }
+      return ok("success");
+    };
+
+    const viz = createVisualizer({ workflowName: "options-test" });
+
+    const workflow = createWorkflow({ failingThenSucceed }, {
+      onEvent: viz.handleEvent,
+    });
+
+    await workflow(async (step, deps) => {
+      await step(() => deps.failingThenSucceed(), {
+        key: "retrying-step",
+        name: "Retrying Operation",
+        retry: { attempts: 3 },
+      });
+    });
+
+    // Get IR and render with custom options
+    const ir = viz.getIR();
+    const { mermaidRenderer } = await import("./renderers/mermaid");
+    const renderer = mermaidRenderer();
+
+    const options: MermaidRenderOptions = {
+      showTimings: true,
+      showKeys: false,
+      colors: defaultColorScheme,
+      showRetryEdges: false,
+      showErrorEdges: false,
+      showTimeoutEdges: false,
+    };
+
+    const diagram = renderer.render(ir, options);
+
+    // Should NOT contain retry self-loop edge when disabled
+    expect(diagram).not.toContain("-.->|");
+    expect(diagram).toContain("flowchart TD");
+    await validateMermaid(diagram);
   });
 });

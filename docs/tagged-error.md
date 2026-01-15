@@ -132,9 +132,11 @@ These **absorb infrastructure chaos** into stable categories. When your HTTP lib
 class DependencyFailed extends TaggedError("DependencyFailed")<{
   service: "users" | "payments" | "notifications";
   operation: string;
+  kind: "timeout" | "network" | "rate_limit" | "bad_response" | "unknown";
   retryable: boolean;
   retryAfterMs?: number;
-  cause?: unknown;  // preserve original for logging
+  statusCode?: number;    // HTTP status if available
+  cause?: unknown;        // preserve original for logging
 }> {}
 ```
 
@@ -147,6 +149,59 @@ class DependencyFailed extends TaggedError("DependencyFailed")<{
 - Optional `statusCode` / `vendorCode` if it helps dashboards/alerting
 
 Many adapters can share the same `DependencyFailed` type; you don't need one per dependency.
+
+**Adapter helper function (recommended):**
+
+Create a single factory function for consistent error creation across all adapters:
+
+```typescript
+// Classify raw errors into stable categories
+function classifyError(e: unknown): DependencyFailed["kind"] {
+  if (e instanceof Error) {
+    const msg = e.message.toLowerCase();
+    if (msg.includes("timeout") || msg.includes("etimedout")) return "timeout";
+    if (msg.includes("econnreset") || msg.includes("network")) return "network";
+    if (msg.includes("rate") || msg.includes("429")) return "rate_limit";
+  }
+  if (e && typeof e === "object" && "status" in e) {
+    const status = (e as { status: number }).status;
+    if (status === 429) return "rate_limit";
+    if (status >= 400 && status < 500) return "bad_response";
+  }
+  return "unknown";
+}
+
+// Single factory for all adapters
+function dependencyFailed(
+  service: DependencyFailed["service"],
+  operation: string,
+  e: unknown
+): DependencyFailed {
+  const kind = classifyError(e);
+  return new DependencyFailed({
+    service,
+    operation,
+    kind,
+    retryable: kind === "timeout" || kind === "network" || kind === "rate_limit",
+    retryAfterMs: kind === "rate_limit" ? extractRetryAfter(e) : undefined,
+    statusCode: extractStatusCode(e),
+    cause: e,
+  });
+}
+
+// Usage in adapters becomes one-liners
+async function fetchUser(userId: string): AsyncResult<User, UserNotFound | DependencyFailed> {
+  try {
+    const response = await httpClient.get(`/users/${userId}`);
+    if (response.status === 404) return err(new UserNotFound({ userId }));
+    return ok(response.data as User);
+  } catch (e) {
+    return err(dependencyFailed("users", "fetchUser", e));
+  }
+}
+```
+
+This keeps error classification logic in one place--update `classifyError()` when you add new error patterns.
 
 **Catch-all for unexpected failures**
 
@@ -380,7 +435,7 @@ This closes the loop: **typed errors → structured logs → appropriate HTTP re
 
 ## Pattern Matching
 
-`TaggedError.match` enforces exhaustive handling:
+`TaggedError.match` enforces exhaustive handling at **system boundaries** (HTTP handlers, queue workers, CLI commands). This is where errors should be translated to responses--not scattered throughout business logic.
 
 > **Note:** Use `_tag` matching for serialized errors; `instanceof` is for in-process errors. If you serialize/deserialize errors across process boundaries, `instanceof` checks will fail, but `_tag` matching remains reliable.
 

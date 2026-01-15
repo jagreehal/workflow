@@ -33,7 +33,7 @@ import type {
   WorkflowIR,
 } from "./types";
 import { createIRBuilder } from "./ir-builder";
-import { asciiRenderer, mermaidRenderer, loggerRenderer, defaultColorScheme } from "./renderers";
+import { asciiRenderer, mermaidRenderer, loggerRenderer, flowchartRenderer, defaultColorScheme } from "./renderers";
 
 // =============================================================================
 // Re-exports
@@ -41,7 +41,7 @@ import { asciiRenderer, mermaidRenderer, loggerRenderer, defaultColorScheme } fr
 
 export * from "./types";
 export { createIRBuilder, type IRBuilderOptions } from "./ir-builder";
-export { asciiRenderer, mermaidRenderer, loggerRenderer, defaultColorScheme } from "./renderers";
+export { asciiRenderer, mermaidRenderer, loggerRenderer, flowchartRenderer, defaultColorScheme } from "./renderers";
 export type { LoggerOutput, LoggerRenderOptions, StepLog, HookLog, WorkflowSummary } from "./renderers";
 export { htmlRenderer, renderToHTML } from "./renderers/html";
 export { detectParallelGroups, createParallelDetector, type ParallelDetectorOptions } from "./parallel-detector";
@@ -142,6 +142,7 @@ export function createVisualizer(
   const ascii = asciiRenderer();
   const mermaid = mermaidRenderer();
   const logger = loggerRenderer();
+  const flowchart = flowchartRenderer();
 
   // Build render options
   const renderOptions: RenderOptions = {
@@ -219,6 +220,9 @@ export function createVisualizer(
 
       case "logger":
         return logger.render(ir, renderOptions);
+
+      case "flowchart":
+        return flowchart.render(ir, renderOptions);
 
       default:
         throw new Error(`Unknown format: ${format}`);

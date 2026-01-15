@@ -21,6 +21,7 @@ import type {
 } from "../types";
 import { isStepNode, isSequenceNode, isParallelNode, isRaceNode, isDecisionNode } from "../types";
 import { asciiRenderer } from "./ascii";
+import { flowchartRenderer } from "./flowchart";
 
 // =============================================================================
 // Types
@@ -102,6 +103,8 @@ export interface LoggerRenderOptions extends RenderOptions {
   includeDiagram?: boolean;
   /** Strip ANSI color codes from diagram (default: true) */
   stripAnsiColors?: boolean;
+  /** Diagram format: 'ascii' (tree-style) or 'flowchart' (boxes/arrows) (default: 'ascii') */
+  diagramFormat?: "ascii" | "flowchart";
 }
 
 // =============================================================================
@@ -275,10 +278,13 @@ function buildLoggerOutput(ir: WorkflowIR, options: LoggerRenderOptions): Logger
     }
   }
 
-  // Add ASCII diagram if requested
+  // Add diagram if requested
   if (includeDiagram) {
-    const ascii = asciiRenderer();
-    let diagram = ascii.render(ir, options);
+    const diagramFormat = options.diagramFormat ?? "ascii";
+    const renderer = diagramFormat === "flowchart"
+      ? flowchartRenderer()
+      : asciiRenderer();
+    let diagram = renderer.render(ir, options);
     if (stripColors) {
       diagram = stripAnsi(diagram);
     }

@@ -45,11 +45,169 @@ export function generateClientScript(options: {
   document.addEventListener('DOMContentLoaded', init);
 
   function init() {
-    ${options.interactive ? "setupInteractivity();" : ""}
-    ${options.timeTravel ? "setupTimeTravel();" : ""}
+    ${options.interactive ? "setupInteractivity(); setupLoadJSON();" : ""}
+    // WebSocket must be initialized before time-travel and heatmap checks
     ${options.wsUrl ? `setupWebSocket('${options.wsUrl}');` : ""}
+    ${options.timeTravel ? "setupTimeTravel(); initializeTimeTravelFromData();" : ""}
     ${options.heatmap ? "setupHeatmap();" : ""}
     setupKeyboardShortcuts();
+  }
+
+  // Load JSON functionality
+  function setupLoadJSON() {
+    const loadBtn = document.getElementById('load-json-btn');
+    const modal = document.getElementById('load-json-modal');
+    const closeBtn = document.getElementById('load-json-close');
+    const cancelBtn = document.getElementById('load-json-cancel');
+    const submitBtn = document.getElementById('load-json-submit');
+    const input = document.getElementById('load-json-input');
+    const errorDiv = document.getElementById('load-json-error');
+
+    if (!loadBtn || !modal) return;
+
+    loadBtn.addEventListener('click', () => {
+      modal.style.display = 'flex';
+      if (input) {
+        input.value = '';
+        input.focus();
+      }
+      if (errorDiv) errorDiv.style.display = 'none';
+    });
+
+    const closeModal = () => {
+      modal.style.display = 'none';
+      if (errorDiv) errorDiv.style.display = 'none';
+    };
+
+    closeBtn?.addEventListener('click', closeModal);
+    cancelBtn?.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeModal();
+    });
+
+    submitBtn?.addEventListener('click', () => {
+      if (!input) return;
+      
+      try {
+        const jsonText = input.value.trim();
+        if (!jsonText) {
+          showError('Please paste JSON data');
+          return;
+        }
+
+        const ir = JSON.parse(jsonText);
+        
+        // Validate IR structure
+        if (!ir || !ir.root || !ir.root.type || ir.root.type !== 'workflow') {
+          showError('Invalid workflow IR. Expected object with root.type === "workflow"');
+          return;
+        }
+
+        // Update global data
+        window.__WORKFLOW_IR__ = ir;
+        const newData = buildWorkflowDataFromIR(ir);
+        window.__WORKFLOW_DATA__ = newData;
+
+        // Save to sessionStorage for full rebuild on reload
+        try {
+          sessionStorage.setItem('workflow_ir', JSON.stringify(ir));
+        } catch (storageErr) {
+          console.warn('Failed to save IR to sessionStorage:', storageErr);
+        }
+
+        // Rebuild the diagram (updates node states in-place)
+        rebuildDiagram(ir);
+
+        // Update inspector if node is selected
+        if (selectedNodeId) {
+          updateInspector(selectedNodeId);
+        }
+
+        closeModal();
+
+        // Offer full rebuild via reload if structure changed significantly
+        console.log('IR loaded. Node states updated. Reload page for full layout rebuild with new structure.');
+      } catch (e) {
+        showError('Invalid JSON: ' + e.message);
+      }
+    });
+
+    function showError(message) {
+      if (errorDiv) {
+        errorDiv.textContent = message;
+        errorDiv.style.display = 'block';
+      }
+    }
+  }
+
+  function buildWorkflowDataFromIR(ir) {
+    const nodes = {};
+    
+    function collectNodes(flowNodes) {
+      for (const node of flowNodes || []) {
+        nodes[node.id] = {
+          id: node.id,
+          name: node.name,
+          type: node.type,
+          state: node.state,
+          key: node.key,
+          durationMs: node.durationMs,
+          startTs: node.startTs,
+          error: node.error ? String(node.error) : undefined,
+          retryCount: node.retryCount,
+        };
+
+        if (node.children) {
+          collectNodes(node.children);
+        }
+        if (node.branches) {
+          for (const branch of node.branches) {
+            collectNodes(branch.children);
+          }
+        }
+      }
+    }
+
+    collectNodes(ir.root.children);
+    return { nodes };
+  }
+
+  function rebuildDiagram(ir) {
+    // Update workflow data and node states
+    const newData = buildWorkflowDataFromIR(ir);
+    window.__WORKFLOW_DATA__ = newData;
+    window.__WORKFLOW_IR__ = ir;
+    
+    // Update existing node states in SVG
+    renderIR(ir);
+    
+    // Note: Full diagram rebuild (new nodes, layout changes) requires regenerating the HTML
+    // For now, we update node states. Users can save the IR and regenerate HTML for full rebuild.
+    console.log('Workflow IR loaded. Node states updated. For full diagram rebuild, regenerate HTML with the new IR.');
+  }
+
+  function initializeTimeTravelFromData() {
+    // For static HTML (no WebSocket), time travel doesn't work since we only have one state
+    // Initialize with empty snapshots and disable controls
+    if (!ws) {
+      snapshots = [];
+      currentSnapshotIndex = -1;
+      updateTimelineUI();
+      
+      // Disable time travel controls for static HTML
+      const playBtn = document.getElementById('tt-play');
+      const pauseBtn = document.getElementById('tt-pause');
+      const prevBtn = document.getElementById('tt-prev');
+      const nextBtn = document.getElementById('tt-next');
+      const slider = document.getElementById('tt-slider');
+      
+      [playBtn, pauseBtn, prevBtn, nextBtn, slider].forEach(btn => {
+        if (btn) {
+          btn.disabled = true;
+          btn.title = 'Time travel requires a live WebSocket connection';
+        }
+      });
+    }
   }
 
   // Interactivity
@@ -94,13 +252,35 @@ export function generateClientScript(options: {
       if (diagram) diagram.style.cursor = 'grab';
     });
 
-    // Node selection
+    // Node selection - handle clicks on nodes and their children (rect, text, etc.)
     document.querySelectorAll('.wv-node').forEach((node) => {
       node.addEventListener('click', (e) => {
         e.stopPropagation();
-        selectNode(node.dataset.nodeId);
+        const nodeId = node.dataset.nodeId;
+        if (nodeId) {
+          selectNode(nodeId);
+        }
       });
     });
+
+    // Also handle clicks directly on child elements (rect, text) that bubble up
+    if (svg) {
+      svg.addEventListener('click', (e) => {
+        // Find the closest .wv-node parent
+        let target = e.target;
+        while (target && target !== svg) {
+          if (target.classList && target.classList.contains('wv-node')) {
+            const nodeId = target.dataset?.nodeId;
+            if (nodeId) {
+              e.stopPropagation();
+              selectNode(nodeId);
+              return;
+            }
+          }
+          target = target.parentElement;
+        }
+      });
+    }
 
     // Deselect on background click
     diagram.addEventListener('click', (e) => {
@@ -293,7 +473,10 @@ export function generateClientScript(options: {
   }
 
   function play() {
-    if (snapshots.length === 0) return;
+    if (snapshots.length === 0) {
+      console.warn('[Visualizer] No snapshots available for time travel. Time travel requires a live WebSocket connection.');
+      return;
+    }
     isPlaying = true;
     updatePlaybackUI();
     playNext();
@@ -321,12 +504,20 @@ export function generateClientScript(options: {
   }
 
   function stepForward() {
+    if (snapshots.length === 0) {
+      console.warn('[Visualizer] No snapshots available for time travel.');
+      return;
+    }
     if (currentSnapshotIndex < snapshots.length - 1) {
       seek(currentSnapshotIndex + 1);
     }
   }
 
   function stepBackward() {
+    if (snapshots.length === 0) {
+      console.warn('[Visualizer] No snapshots available for time travel.');
+      return;
+    }
     if (currentSnapshotIndex > 0) {
       seek(currentSnapshotIndex - 1);
     }
@@ -440,6 +631,19 @@ export function generateClientScript(options: {
   function setupHeatmap() {
     const toggle = document.getElementById('heatmap-toggle');
     const metricSelect = document.getElementById('heatmap-metric');
+
+    // For static HTML (no WebSocket), disable heatmap controls
+    if (!ws) {
+      if (toggle) {
+        toggle.disabled = true;
+        toggle.title = 'Heatmap requires a live WebSocket connection with performance data';
+      }
+      if (metricSelect) {
+        metricSelect.disabled = true;
+        metricSelect.title = 'Heatmap requires a live WebSocket connection with performance data';
+      }
+      return;
+    }
 
     toggle?.addEventListener('click', () => {
       heatmapEnabled = !heatmapEnabled;

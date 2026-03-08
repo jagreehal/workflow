@@ -125,7 +125,7 @@
     "@vitest/coverage-v8": "^4.0.17",
     "eslint": "9.39.2",
     "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-unicorn": "^62.0.0",
+    "eslint-plugin-unicorn": "^63.0.0",
     "jsdom": "^27.4.0",
     "mermaid": "^11.12.2",
     "pino": "^10.2.0",
